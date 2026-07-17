@@ -61,6 +61,7 @@ class LayoutTracker:
         self.hist = {b: deque(maxlen=self.STILL_WIN) for b in ("white", "yellow", "red")}
         self.last_layout = None
         self.probs = None
+        self.best = {}      # 수구별 추천 샷 (가장 약한 힘으로 성공): (각도, 속도, side, vert)
         self.records = []   # (frame, layout, p_white, p_yellow)
 
     def update(self, frame_idx, balls_tbl):
@@ -87,10 +88,12 @@ class LayoutTracker:
             + abs(layout[b][1] - self.last_layout[b][1]) > self.CHANGE_EPS
             for b in layout)
         if changed:
-            p_w = estimate_probability(layout, cue="white", n_angles=self.n_angles)[0]
-            p_y = estimate_probability(layout, cue="yellow", n_angles=self.n_angles)[0]
+            p_w, shots_w = estimate_probability(layout, cue="white", n_angles=self.n_angles)[:2]
+            p_y, shots_y = estimate_probability(layout, cue="yellow", n_angles=self.n_angles)[:2]
             self.last_layout = layout
             self.probs = (p_w, p_y)
+            self.best = {"white": min(shots_w, key=lambda s: s[1]) if shots_w else None,
+                         "yellow": min(shots_y, key=lambda s: s[1]) if shots_y else None}
             self.records.append((frame_idx, layout, p_w, p_y))
             print(f"  프레임 {frame_idx}: 새 배치 감지 → white {p_w:.1%} / yellow {p_y:.1%}")
         return self.probs
@@ -183,12 +186,27 @@ def main():
             cv2.putText(annotated, "camera cut - coords excluded", (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
 
-        bar = np.full((44, mw, 3), (45, 45, 45), np.uint8)
+        bar = np.full((88, mw, 3), (45, 45, 45), np.uint8)
         if probs:
             cv2.putText(bar, f"3C prob  W {probs[0]:.1%} | Y {probs[1]:.1%}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (80, 230, 80), 2)
+                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (80, 230, 80), 2)
+            # 추천 샷(가장 약한 힘으로 성공하는 조합) + 미니맵에 조준 방향 화살표
+            for row, cue_name in enumerate(("white", "yellow")):
+                shot = tracker.best.get(cue_name)
+                if not shot or cue_name not in tracker.last_layout:
+                    continue
+                deg, v, s, t = shot
+                cv2.putText(bar, f"{cue_name[0].upper()} best {deg:.0f}deg v{v:.1f} "
+                                 f"side{s:+.1f} vert{t:+.1f}",
+                            (10, 52 + row * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            BGR[cue_name], 1)
+                bx, by = tracker.last_layout[cue_name]
+                p1 = (int(bx * mw), int(by * mh))
+                rad = np.deg2rad(deg)   # 미니맵이 실제 테이블과 같은 2:1 비율이라 각도 보존
+                p2 = (int(p1[0] + 55 * np.cos(rad)), int(p1[1] + 55 * np.sin(rad)))
+                cv2.arrowedLine(mini, p1, p2, BGR[cue_name], 2, tipLength=0.25)
         else:
-            cv2.putText(bar, "in play...", (10, 30),
+            cv2.putText(bar, "in play...", (10, 28),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 200, 200), 2)
         panel = np.vstack([mini, bar])
         ph, pw_ = panel.shape[:2]
