@@ -16,7 +16,6 @@ from cuecast_yolo.color_detector import (
 )
 from cuecast_yolo.detector import BALL_NAMES, YOLOBallDetector
 from cuecast_yolo.output import CoordinateEvent, EventWriter, format_timestamp
-from cuecast_yolo.precut import PreCutLayoutBuffer
 from cuecast_yolo.stop_detector import BallStopDetector
 from cuecast_yolo.view_gate import is_fixed_top_view
 from render_board import render_virtual_table
@@ -42,14 +41,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sample-fps", type=float, default=10.0)
     parser.add_argument("--max-seconds", type=float)
-    parser.add_argument("--stable-seconds", type=float, default=0.7)
-    parser.add_argument("--stop-threshold", type=float, default=0.008)
-    parser.add_argument("--move-threshold", type=float, default=0.025)
-    parser.add_argument("--min-blue-ratio", type=float, default=0.42)
-    parser.add_argument("--max-outer-blue-ratio", type=float, default=0.12)
-    parser.add_argument("--precut-buffer-seconds", type=float, default=0.6)
-    parser.add_argument("--precut-max-step", type=float, default=0.02)
-    parser.add_argument("--precut-max-span", type=float, default=0.04)
+    parser.add_argument("--stable-seconds", type=float, default=1.0)
+    parser.add_argument("--stop-threshold", type=float, default=0.004)
+    parser.add_argument("--move-threshold", type=float, default=0.015)
+    parser.add_argument("--min-edge-support", type=float, default=0.58)
+    parser.add_argument("--min-side-edge-support", type=float, default=0.42)
     parser.add_argument("--duplicate-threshold", type=float, default=0.05)
     parser.add_argument(
         "--ball-model",
@@ -208,11 +204,6 @@ def main() -> None:
         stop_threshold=args.stop_threshold,
         move_threshold=args.move_threshold,
     )
-    precut_buffer = PreCutLayoutBuffer(
-        buffer_seconds=args.precut_buffer_seconds,
-        max_step=args.precut_max_step,
-        max_span=args.precut_max_span,
-    )
 
     virtual_frame = render_virtual_table(
         to_virtual_coordinates(None), compact_labels=True, show_title=False
@@ -221,12 +212,11 @@ def main() -> None:
     event_timestamp: float | None = None
     frame_number = 0
     top_view = False
-    previous_top_view = False
     analyzed_frames = 0
     complete_detection_frames = 0
     accepted_layouts: list[dict[str, tuple[float, float]]] = []
     event_metadata: list[dict[str, object]] = []
-    source_counts = {"stable": 0, "pre_cut": 0}
+    stopped_events = 0
     started = time.perf_counter()
 
     def accept_layout(
@@ -237,7 +227,7 @@ def main() -> None:
         source: str,
         event_writer: EventWriter,
     ) -> bool:
-        nonlocal event_id, event_timestamp, virtual_frame
+        nonlocal event_id, event_timestamp, virtual_frame, stopped_events
         if any(
             layout_distance(positions, existing) <= args.duplicate_threshold
             for existing in accepted_layouts
@@ -263,7 +253,7 @@ def main() -> None:
             str(snapshots_dir / f"event_{event_id:04d}_{source}.png"),
             virtual_frame,
         )
-        source_counts[source] += 1
+        stopped_events += 1
         event_metadata.append({**event.to_dict(), "source": source})
         print(
             f"event {event_id} [{source}]: {format_timestamp(timestamp)} "
@@ -283,12 +273,11 @@ def main() -> None:
 
                 if frame_number % sample_interval == 0:
                     analyzed_frames += 1
-                    previous_top_view = top_view
                     top_view = is_fixed_top_view(
                         frame,
                         corners,
-                        min_inner_blue_ratio=args.min_blue_ratio,
-                        max_outer_blue_ratio=args.max_outer_blue_ratio,
+                        min_mean_edge_support=args.min_edge_support,
+                        min_side_edge_support=args.min_side_edge_support,
                     )
                     positions: dict[str, tuple[float, float]] = {}
                     if top_view:
@@ -301,18 +290,6 @@ def main() -> None:
                         if all(name in detections for name in BALL_NAMES):
                             complete_detection_frames += 1
                             positions = color_detector.normalized_positions(detections)
-                            precut_buffer.add(timestamp, positions)
-
-                    if previous_top_view and not top_view:
-                        pre_cut = precut_buffer.finalize_on_cut(timestamp)
-                        if pre_cut is not None:
-                            accept_layout(
-                                pre_cut.positions,
-                                timestamp=pre_cut.timestamp,
-                                event_frame=round(pre_cut.timestamp * source_fps),
-                                source="pre_cut",
-                                event_writer=event_writer,
-                            )
 
                     stop_event = stop_detector.update(timestamp, positions)
                     if stop_event is not None:
@@ -320,7 +297,7 @@ def main() -> None:
                             stop_event.positions,
                             timestamp=stop_event.timestamp,
                             event_frame=frame_number,
-                            source="stable",
+                            source="stopped",
                             event_writer=event_writer,
                         )
 
@@ -359,8 +336,7 @@ def main() -> None:
         "analyzed_frames": analyzed_frames,
         "complete_detection_frames": complete_detection_frames,
         "stop_events": event_id,
-        "stable_events": source_counts["stable"],
-        "pre_cut_events": source_counts["pre_cut"],
+        "stopped_events": stopped_events,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"

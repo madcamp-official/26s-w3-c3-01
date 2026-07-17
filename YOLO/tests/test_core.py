@@ -10,7 +10,7 @@ from cuecast_yolo.color_detector import ColorBallDetector
 from cuecast_yolo.geometry import TableTransform
 from cuecast_yolo.precut import PreCutLayoutBuffer
 from cuecast_yolo.stop_detector import BallStopDetector
-from cuecast_yolo.view_gate import fixed_top_view_ratios, is_fixed_top_view
+from cuecast_yolo.view_gate import fixed_top_view_edge_support, is_fixed_top_view
 
 
 class TableTransformTest(unittest.TestCase):
@@ -67,6 +67,24 @@ class BallStopDetectorTest(unittest.TestCase):
 
 
 class ColorBallDetectorTest(unittest.TestCase):
+    def test_finds_inner_boundary_without_using_cloth_color(self) -> None:
+        for cloth in ((170, 90, 25), (40, 145, 55)):
+            frame = np.full((360, 640, 3), (25, 25, 25), dtype=np.uint8)
+            cv2.rectangle(frame, (110, 50), (530, 280), cloth, -1)
+            playing_cloth = tuple(min(255, channel + 35) for channel in cloth)
+            cv2.rectangle(frame, (135, 75), (505, 260), playing_cloth, -1)
+            cv2.rectangle(frame, (135, 75), (505, 260), (12, 12, 12), 3)
+
+            table = ColorBallDetector().find_table(frame)
+
+            self.assertIsNotNone(table)
+            assert table is not None
+            np.testing.assert_allclose(
+                table.corners,
+                np.float32([[135, 75], [505, 75], [505, 260], [135, 260]]),
+                atol=5,
+            )
+
     def test_rejects_table_touching_frame_edges(self) -> None:
         detector = ColorBallDetector()
         touching = np.float32([[0, 20], [639, 20], [639, 340], [0, 340]])
@@ -101,20 +119,29 @@ class FixedTopViewGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.corners = np.int32([[30, 20], [170, 20], [170, 80], [30, 80]])
 
-    def test_accepts_blue_inside_and_non_blue_outside(self) -> None:
-        frame = np.zeros((100, 200, 3), dtype=np.uint8)
-        cv2.fillConvexPoly(frame, self.corners, (255, 150, 40))
-        inner, outer = fixed_top_view_ratios(frame, self.corners, ring_width=8)
-        self.assertGreater(inner, 0.95)
-        self.assertLess(outer, 0.05)
-        self.assertTrue(is_fixed_top_view(frame, self.corners, ring_width=8))
+    def test_accepts_inner_lines_for_different_cloth_colors(self) -> None:
+        for cloth in ((210, 120, 30), (45, 160, 70)):
+            frame = np.full((100, 200, 3), cloth, dtype=np.uint8)
+            cv2.polylines(frame, [self.corners], True, (15, 15, 15), 3)
+            support = fixed_top_view_edge_support(
+                frame, self.corners, search_radius=3
+            )
+            self.assertGreater(min(support), 0.90)
+            self.assertTrue(
+                is_fixed_top_view(frame, self.corners, search_radius=3)
+            )
 
-    def test_rejects_zoomed_blue_table_outside_fixed_corners(self) -> None:
-        frame = np.full((100, 200, 3), (255, 150, 40), dtype=np.uint8)
-        inner, outer = fixed_top_view_ratios(frame, self.corners, ring_width=8)
-        self.assertGreater(inner, 0.95)
-        self.assertGreater(outer, 0.95)
-        self.assertFalse(is_fixed_top_view(frame, self.corners, ring_width=8))
+    def test_rejects_frame_without_calibrated_inner_lines(self) -> None:
+        frame = np.full((100, 200, 3), (210, 120, 30), dtype=np.uint8)
+        shifted = self.corners + np.int32([10, 8])
+        cv2.polylines(frame, [shifted], True, (15, 15, 15), 2)
+        support = fixed_top_view_edge_support(
+            frame, self.corners, search_radius=3
+        )
+        self.assertLess(float(np.mean(support)), 0.30)
+        self.assertFalse(
+            is_fixed_top_view(frame, self.corners, search_radius=3)
+        )
 
 
 class VirtualComparisonTest(unittest.TestCase):

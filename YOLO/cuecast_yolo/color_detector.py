@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .detector import BallDetection
+from .table_edges import detect_inner_table_corners
 
 
 WARP_WIDTH = 1000
@@ -53,6 +54,24 @@ class ColorBallDetector:
         self.max_corner_deviation = max_corner_deviation
 
     def find_table(self, image: np.ndarray) -> TableView | None:
+        """Detect the inner cushion boundary from lines, independent of color."""
+
+        corners = detect_inner_table_corners(
+            image,
+            min_area_ratio=self.min_table_area_ratio,
+            expected_corners=self.expected_corners,
+            max_corner_deviation=self.max_corner_deviation,
+        )
+        if corners is None or not self._corners_have_frame_margin(corners, image.shape):
+            return None
+        warp_corners = (
+            self.expected_corners
+            if self.expected_corners is not None
+            else corners
+        )
+        return self.table_view_from_corners(image, warp_corners)
+
+    def _find_table_by_blue(self, image: np.ndarray) -> TableView | None:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         blue = cv2.inRange(hsv, (85, 55, 45), (115, 255, 255))
         blue = cv2.morphologyEx(
@@ -164,7 +183,7 @@ class ColorBallDetector:
 
         hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
         b, g, r = cv2.split(warped)
-        blue_background = cv2.inRange(hsv, (85, 55, 45), (115, 255, 255))
+        cloth_background = self._estimate_cloth_mask(warped)
         dark_background = cv2.inRange(hsv, (0, 0, 0), (179, 255, 72))
         masks = {
             "white_ball": cv2.inRange(hsv, (0, 0, 135), (179, 82, 255)),
@@ -200,7 +219,7 @@ class ColorBallDetector:
             candidates = self._find_candidates(
                 mask,
                 name,
-                blue_background=blue_background,
+                blue_background=cloth_background,
                 dark_background=dark_background,
             )
             if candidates:
@@ -214,7 +233,7 @@ class ColorBallDetector:
             hough_candidates = self._find_hough_candidates(
                 warped,
                 masks,
-                blue_background,
+                cloth_background,
                 dark_background,
             )
             for name, candidates in hough_candidates.items():
@@ -406,6 +425,31 @@ class ColorBallDetector:
             / ring_count
         )
         return blue_ratio, dark_ratio
+
+    @staticmethod
+    def _estimate_cloth_mask(image: np.ndarray) -> np.ndarray:
+        """Estimate the cloth region from its dominant color, whatever its hue."""
+
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        height, width = lab.shape[:2]
+        inset_y = max(1, round(height * 0.08))
+        inset_x = max(1, round(width * 0.08))
+        sample = lab[inset_y : height - inset_y, inset_x : width - inset_x]
+        if sample.size == 0:
+            sample = lab
+        representative = np.median(sample.reshape(-1, 3), axis=0)
+        delta = lab - representative
+        distance = np.sqrt(
+            (delta[:, :, 0] * 0.55) ** 2
+            + delta[:, :, 1] ** 2
+            + delta[:, :, 2] ** 2
+        )
+        mask = (distance <= 34.0).astype(np.uint8) * 255
+        return cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+        )
 
     def _corners_have_frame_margin(
         self, corners: np.ndarray, image_shape: tuple[int, ...]

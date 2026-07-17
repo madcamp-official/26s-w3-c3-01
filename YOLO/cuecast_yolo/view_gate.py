@@ -1,50 +1,39 @@
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
+from .table_edges import edge_support_per_side
 
-def fixed_top_view_ratios(
+
+def fixed_top_view_edge_support(
     image: np.ndarray,
     corners: np.ndarray,
     *,
-    ring_width: int = 20,
-) -> tuple[float, float]:
-    """Return blue-cloth ratios inside and just outside fixed table corners."""
+    search_radius: int = 4,
+) -> tuple[float, float, float, float]:
+    """Return color-independent support for top, right, bottom and left lines."""
 
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    blue = cv2.inRange(hsv, (85, 55, 45), (115, 255, 255)) > 0
-    polygon = np.round(np.asarray(corners)).astype(np.int32)
-    if polygon.shape != (4, 2):
-        raise ValueError("table corners must have shape (4, 2)")
-
-    inner_mask = np.zeros(blue.shape, dtype=np.uint8)
-    cv2.fillConvexPoly(inner_mask, polygon, 255)
-    size = max(3, ring_width * 2 + 1)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
-    expanded = cv2.dilate(inner_mask, kernel) > 0
-    inside = inner_mask > 0
-    outside_ring = expanded & ~inside
-
-    inner_ratio = float(blue[inside].mean()) if np.any(inside) else 0.0
-    outer_ratio = (
-        float(blue[outside_ring].mean()) if np.any(outside_ring) else 1.0
+    return edge_support_per_side(
+        image, corners, search_radius=search_radius
     )
-    return inner_ratio, outer_ratio
 
 
 def is_fixed_top_view(
     image: np.ndarray,
     corners: np.ndarray,
     *,
-    min_inner_blue_ratio: float = 0.42,
-    max_outer_blue_ratio: float = 0.12,
-    ring_width: int = 20,
+    min_mean_edge_support: float = 0.58,
+    min_side_edge_support: float = 0.42,
+    min_supported_sides: int = 3,
+    search_radius: int = 4,
 ) -> bool:
-    inner_ratio, outer_ratio = fixed_top_view_ratios(
-        image, corners, ring_width=ring_width
+    """Check that the calibrated inner cushion lines are present in the frame."""
+
+    support = fixed_top_view_edge_support(
+        image, corners, search_radius=search_radius
     )
+    supported_sides = sum(value >= min_side_edge_support for value in support)
     return (
-        inner_ratio >= min_inner_blue_ratio
-        and outer_ratio <= max_outer_blue_ratio
+        float(np.mean(support)) >= min_mean_edge_support
+        and supported_sides >= min_supported_sides
     )
