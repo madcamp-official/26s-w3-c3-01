@@ -56,7 +56,7 @@ class LayoutTracker:
     SEEN_WITHIN = 40    # 이 프레임 수 안에 관측된 공만 유효
     CHANGE_EPS = 0.02   # 이보다 크게 움직였으면 새 배치로 판정
 
-    def __init__(self, n_angles=240):
+    def __init__(self, n_angles=120):   # 스핀 그리드(3x3) 추가로 샷 수가 늘어 각도는 3° 간격
         self.n_angles = n_angles
         self.hist = {b: deque(maxlen=self.STILL_WIN) for b in ("white", "yellow", "red")}
         self.last_layout = None
