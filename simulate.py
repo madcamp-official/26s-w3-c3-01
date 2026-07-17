@@ -122,6 +122,33 @@ def simulate_shots(pos0, ang, spd, side=None, vert=None, record=False):
     return success, frames
 
 
+def pick_robust_shot(shots, step_deg):
+    """성공 샷 중 '연속으로 성공하는 각도 폭이 가장 넓은 클러스터'의 중심 샷 선택.
+    프로가 고르는 '실수 허용이 큰 길'에 해당한다. step_deg는 각도 샘플 간격.
+    반환: ((각도, 속도, side, vert, 허용폭±deg), 성공 각도 목록) — 성공 없으면 (None, [])"""
+    if not shots:
+        return None, []
+    angs = sorted({s[0] % 360 for s in shots})
+    gap = step_deg + 1e-6
+    clusters, cur = [], [angs[0]]
+    for a in angs[1:]:
+        if a - cur[-1] <= gap:
+            cur.append(a)
+        else:
+            clusters.append(cur)
+            cur = [a]
+    clusters.append(cur)
+    if len(clusters) > 1 and angs[0] + 360 - angs[-1] <= gap:   # 0°/360° 경계 병합
+        clusters[0] = [a - 360 for a in clusters.pop()] + clusters[0]
+
+    best = max(clusters, key=len)
+    center = best[len(best) // 2] % 360
+    tol = len(best) * step_deg / 2
+    cands = [s for s in shots if abs(s[0] % 360 - center) < 1e-6]
+    pick = min(cands, key=lambda s: (abs(s[2]) + abs(s[3]), s[1]))  # 스핀 적고 약한 샷 우선
+    return (center, pick[1], pick[2], pick[3], tol), angs
+
+
 # ---------- 궤적 시각화 ----------
 def draw_shot(pos0, angle, speed, side, vert, names, out_path):
     _, frames = simulate_shots(pos0, np.array([angle]), np.array([speed]),
@@ -183,7 +210,7 @@ def main():
     no_spin = [s for s in shots if s[2] == 0 and s[3] == 0]
     print(f"  무회전 샷만: {len(no_spin)}/{360 * 3} ({len(no_spin) / (360 * 3):.1%}) → 스핀 효과 확인용")
 
-    best = shots
+    best, step = shots, 1.0
     if args.aim is not None:
         prob_aim, shots_aim, _, _ = estimate_probability(
             balls, cue=args.cue, aim_deg=args.aim, aim_tol_deg=args.aim_tol)
@@ -192,12 +219,14 @@ def main():
               f"{prob_aim:.1%} ({len(shots_aim)}/{n_aim} 샷)")
         for a, v, s, t in sorted(shots_aim, key=lambda x: x[1])[:5]:
             print(f"  성공 예: 각도 {a:.1f}°, 속도 {v} m/s, 사이드 {s:+.1f}, 상하 {t:+.1f}")
-        best = shots_aim
+        best, step = shots_aim, args.aim_tol * 2 / 40
 
-    if best:
-        a, v, s, t = min(best, key=lambda x: x[1])  # 가장 약한 힘으로 성공한 샷을 시각화
+    pick, _ = pick_robust_shot(best, step)
+    if pick:
+        a, v, s, t, tol = pick   # 성공 각도 폭이 가장 넓은(오차 허용 최대) 샷
         draw_shot(pos0, np.deg2rad(a), v, s, t, names, "sim_shot.png")
-        print(f"\n저장: sim_shot.png (각도 {a:.0f}°, 속도 {v} m/s, 당점 사이드 {s:+.1f}/상하 {t:+.1f})")
+        print(f"\n저장: sim_shot.png (각도 {a:.0f}°±{tol:.0f}°, 속도 {v} m/s, "
+              f"당점 사이드 {s:+.1f}/상하 {t:+.1f})")
 
 
 if __name__ == "__main__":

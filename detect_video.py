@@ -11,7 +11,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from detect_pipeline import find_table_corners, px_to_table
-from simulate import estimate_probability
+from simulate import estimate_probability, pick_robust_shot
 
 MODEL_PATH = "best_3cls.pt"
 BGR = {"white": (255, 255, 255), "yellow": (0, 180, 255), "red": (0, 0, 220)}
@@ -24,7 +24,8 @@ def detect_corners_fast(frame, scale=0.25):
     """축소본에서 당구대 꼭짓점 검출 (프레임별 검증용). 실패 시 None."""
     small = cv2.resize(frame, None, fx=scale, fy=scale)
     try:
-        return find_table_corners(small) / scale
+        # 커널도 축소 비율에 맞춰야 주변 그래픽(점수판 등)과 붙지 않는다
+        return find_table_corners(small, close_ks=max(3, round(15 * scale))) / scale
     except (ValueError, cv2.error):
         return None
 
@@ -61,7 +62,8 @@ class LayoutTracker:
         self.hist = {b: deque(maxlen=self.STILL_WIN) for b in ("white", "yellow", "red")}
         self.last_layout = None
         self.probs = None
-        self.best = {}      # 수구별 추천 샷 (가장 약한 힘으로 성공): (각도, 속도, side, vert)
+        self.best = {}      # 수구별 추천 샷 (성공 각도 폭 최대): (각도, 속도, side, vert, ±폭)
+        self.fans = {}      # 수구별 성공 각도 전체 목록 (부채살 표시용)
         self.records = []   # (frame, layout, p_white, p_yellow)
 
     def update(self, frame_idx, balls_tbl):
@@ -92,15 +94,17 @@ class LayoutTracker:
             p_y, shots_y = estimate_probability(layout, cue="yellow", n_angles=self.n_angles)[:2]
             self.last_layout = layout
             self.probs = (p_w, p_y)
-            self.best = {"white": min(shots_w, key=lambda s: s[1]) if shots_w else None,
-                         "yellow": min(shots_y, key=lambda s: s[1]) if shots_y else None}
+            step = 360.0 / self.n_angles
+            for cue_name, shots in (("white", shots_w), ("yellow", shots_y)):
+                self.best[cue_name], self.fans[cue_name] = pick_robust_shot(shots, step)
             self.records.append((frame_idx, layout, p_w, p_y))
             print(f"  프레임 {frame_idx}: 새 배치 감지 → white {p_w:.1%} / yellow {p_y:.1%}")
         return self.probs
 
 
-def render_prediction_pane(balls_tbl, tracker, top_view, w, h):
-    """우측 예측 화면: 0~1 정규화 테이블 위에 공 위치·좌표·확률·추천 샷 표시."""
+def render_prediction_pane(balls_tbl, tracker, top_view, still, w, h):
+    """우측 예측 화면: 0~1 정규화 테이블 위에 공 위치·좌표·확률·추천 샷 표시.
+    still=False(공 이동 중)면 확률·부채살 대신 in play 표시."""
     pane = np.full((h, w, 3), (35, 35, 35), np.uint8)
     tw = min(w - 80, (h - 170) * 2)          # 테이블은 2:1 비율 유지
     th = tw // 2
@@ -110,6 +114,21 @@ def render_prediction_pane(balls_tbl, tracker, top_view, w, h):
 
     to_px = lambda tx, ty: (x0 + int(tx * tw), y0 + int(ty * th))
     r = max(6, int(tw * 0.0108))             # 공 반지름 (실제 비율)
+
+    # 성공 방향 부채살: 3쿠션이 되는 모든 각도를 반투명 광선으로 표시
+    if top_view and still and tracker.probs and tracker.last_layout:
+        overlay = pane.copy()
+        for cue_name in ("white", "yellow"):
+            if cue_name not in tracker.last_layout:
+                continue
+            p1 = to_px(*tracker.last_layout[cue_name])
+            for a in tracker.fans.get(cue_name) or []:
+                rad = np.deg2rad(a)
+                p2 = (int(p1[0] + 0.10 * tw * np.cos(rad)),
+                      int(p1[1] + 0.10 * tw * np.sin(rad)))
+                cv2.line(overlay, p1, p2, BGR[cue_name], 2)
+        pane = cv2.addWeighted(overlay, 0.35, pane, 0.65, 0)
+
     for name, _, tx, ty in balls_tbl:
         p = to_px(tx, ty)
         cv2.circle(pane, p, r, BGR.get(name, (0, 255, 0)), -1)
@@ -121,16 +140,16 @@ def render_prediction_pane(balls_tbl, tracker, top_view, w, h):
     if not top_view:
         cv2.putText(pane, "CAMERA CUT - coords excluded", (x0, ty_text),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 0, 255), 2)
-    elif tracker.probs:
+    elif still and tracker.probs:
         cv2.putText(pane, f"3C prob  W {tracker.probs[0]:.1%} | Y {tracker.probs[1]:.1%}",
                     (x0, ty_text), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 230, 80), 2)
         for row, cue_name in enumerate(("white", "yellow")):
             shot = tracker.best.get(cue_name)
             if not shot or cue_name not in (tracker.last_layout or {}):
                 continue
-            deg, v, s, t = shot
-            cv2.putText(pane, f"{cue_name[0].upper()} best {deg:.0f}deg v{v:.1f} "
-                              f"side{s:+.1f} vert{t:+.1f}",
+            deg, v, s, t, tol = shot          # 성공 각도 폭이 가장 넓은 샷 (±tol)
+            cv2.putText(pane, f"{cue_name[0].upper()} best {deg:.0f}deg(+-{tol:.0f}) "
+                              f"v{v:.1f} side{s:+.1f} vert{t:+.1f}",
                         (x0, ty_text + 35 + row * 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, BGR[cue_name], 2)
             bx, by = tracker.last_layout[cue_name]
@@ -208,8 +227,8 @@ def main():
             rows.append([frame_idx, round(frame_idx / fps, 3), name,
                          round(conf, 3), round(tx, 4), round(ty, 4)])
 
-        # 정지 배치 감지 → 시뮬레이션 확률 (탑뷰에서만)
-        tracker.update(frame_idx, balls_tbl) if top_view else None
+        # 정지 배치 감지 → 시뮬레이션 확률 (탑뷰에서만). 반환값이 있으면 정지 상태
+        still = bool(tracker.update(frame_idx, balls_tbl)) if top_view else False
 
         # 좌측: 원본 영상 + 공 박스 (신뢰도 대신 0~1 정규화 좌표 표시)
         annotated = frame.copy()
@@ -231,7 +250,7 @@ def main():
         out_h = 720
         left_w = int(round(annotated.shape[1] * out_h / annotated.shape[0] / 2)) * 2
         left = cv2.resize(annotated, (left_w, out_h))
-        right = render_prediction_pane(balls_tbl, tracker, top_view, left_w, out_h)
+        right = render_prediction_pane(balls_tbl, tracker, top_view, still, left_w, out_h)
         composed = np.hstack([left, right])
 
         if writer is None:
