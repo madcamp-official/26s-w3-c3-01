@@ -4,12 +4,14 @@
 import argparse
 import csv
 import time
+from collections import deque
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
 from detect_pipeline import find_table_corners, px_to_table
+from simulate import estimate_probability
 
 MODEL_PATH = "best_3cls.pt"
 BGR = {"white": (255, 255, 255), "yellow": (0, 180, 255), "red": (0, 0, 220)}
@@ -45,6 +47,55 @@ def plausible_top_view(corners, frame_shape):
     return 1.6 < aspect < 2.4 and horizontal and area > 0.2
 
 
+# ---------- 샷 직전 배치 감지 + 확률 계산 (시뮬레이션 엔진 통합) ----------
+class LayoutTracker:
+    """공 3개가 모두 멈춘 '샷 직전 배치'를 감지하고, 배치가 바뀔 때마다
+    시뮬레이션으로 3쿠션 성공 확률(white/yellow 수구 각각)을 계산한다."""
+    STILL_WIN = 25      # 정지 판정에 쓰는 최근 관측 수
+    STILL_EPS = 0.006   # 윈도우 안 이동 허용치 (정규화 좌표, 약 1.7cm)
+    SEEN_WITHIN = 40    # 이 프레임 수 안에 관측된 공만 유효
+    CHANGE_EPS = 0.02   # 이보다 크게 움직였으면 새 배치로 판정
+
+    def __init__(self, n_angles=240):
+        self.n_angles = n_angles
+        self.hist = {b: deque(maxlen=self.STILL_WIN) for b in ("white", "yellow", "red")}
+        self.last_layout = None
+        self.probs = None
+        self.records = []   # (frame, layout, p_white, p_yellow)
+
+    def update(self, frame_idx, balls_tbl):
+        """정지 배치면 (p_white, p_yellow) 반환, 진행 중이면 None."""
+        best = {}
+        for name, conf, tx, ty in balls_tbl:   # 클래스별 최고 신뢰도 1개만
+            if name in self.hist and conf > best.get(name, (0,))[0]:
+                best[name] = (conf, tx, ty)
+        for name, (_, tx, ty) in best.items():
+            self.hist[name].append((frame_idx, tx, ty))
+
+        layout = {}
+        for b, dq in self.hist.items():
+            if len(dq) < 8 or frame_idx - dq[-1][0] > self.SEEN_WITHIN:
+                return None                     # 관측 부족 또는 오래 안 보임
+            xs = [p[1] for p in dq]
+            ys = [p[2] for p in dq]
+            if max(xs) - min(xs) > self.STILL_EPS or max(ys) - min(ys) > self.STILL_EPS:
+                return None                     # 아직 움직이는 중
+            layout[b] = (xs[-1], ys[-1])
+
+        changed = self.last_layout is None or any(
+            abs(layout[b][0] - self.last_layout[b][0])
+            + abs(layout[b][1] - self.last_layout[b][1]) > self.CHANGE_EPS
+            for b in layout)
+        if changed:
+            p_w = estimate_probability(layout, cue="white", n_angles=self.n_angles)[0]
+            p_y = estimate_probability(layout, cue="yellow", n_angles=self.n_angles)[0]
+            self.last_layout = layout
+            self.probs = (p_w, p_y)
+            self.records.append((frame_idx, layout, p_w, p_y))
+            print(f"  프레임 {frame_idx}: 새 배치 감지 → white {p_w:.1%} / yellow {p_y:.1%}")
+        return self.probs
+
+
 def draw_minimap(balls_tbl, w=400, h=200):
     """balls_tbl: [(이름, conf, tx, ty)] 정규화 좌표 → 미니맵 이미지"""
     mini = np.full((h, w, 3), (140, 90, 30), np.uint8)
@@ -73,6 +124,7 @@ def main():
 
     model = YOLO(MODEL_PATH)
     corners = None          # 방송 화면에서 당구대는 고정 → 첫 프레임에서 1번만 검출
+    tracker = LayoutTracker()
     writer = None
     rows = []
     n_proc, n_top, t0 = 0, 0, time.time()
@@ -118,7 +170,10 @@ def main():
             rows.append([frame_idx, round(frame_idx / fps, 3), name,
                          round(conf, 3), round(tx, 4), round(ty, 4)])
 
-        # 탐지 오버레이 + 우상단 미니맵 합성
+        # 정지 배치 감지 → 시뮬레이션 확률 (탑뷰에서만)
+        probs = tracker.update(frame_idx, balls_tbl) if top_view else None
+
+        # 탐지 오버레이 + 우상단 미니맵 + 확률 바 합성
         annotated = res.plot()
         mini = draw_minimap(balls_tbl)
         mh, mw = mini.shape[:2]
@@ -127,7 +182,17 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
             cv2.putText(annotated, "camera cut - coords excluded", (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
-        annotated[10:10 + mh, annotated.shape[1] - mw - 10:annotated.shape[1] - 10] = mini
+
+        bar = np.full((44, mw, 3), (45, 45, 45), np.uint8)
+        if probs:
+            cv2.putText(bar, f"3C prob  W {probs[0]:.1%} | Y {probs[1]:.1%}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (80, 230, 80), 2)
+        else:
+            cv2.putText(bar, "in play...", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 200, 200), 2)
+        panel = np.vstack([mini, bar])
+        ph, pw_ = panel.shape[:2]
+        annotated[10:10 + ph, annotated.shape[1] - pw_ - 10:annotated.shape[1] - 10] = panel
 
         if writer is None:
             h, w = annotated.shape[:2]
@@ -147,9 +212,18 @@ def main():
         w.writerow(["frame", "time_s", "ball", "conf", "table_x", "table_y"])
         w.writerows(rows)
 
+    with open("shots.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "time_s", "p_white", "p_yellow",
+                    "white_x", "white_y", "yellow_x", "yellow_y", "red_x", "red_y"])
+        for fi, layout, p_w, p_y in tracker.records:
+            w.writerow([fi, round(fi / fps, 2), round(p_w, 4), round(p_y, 4)]
+                       + [round(v, 4) for b in ("white", "yellow", "red") for v in layout[b]])
+
     print(f"\n처리: {n_proc}프레임 in {elapsed:.1f}s ({n_proc / max(elapsed, 1e-9):.1f} fps)")
     print(f"탑뷰 프레임: {n_top}/{n_proc} ({n_top / max(n_proc, 1):.1%}) — 나머지는 카메라 전환 구간으로 제외")
-    print(f"저장: {args.out} (합성 영상), {args.csv} (좌표 {len(rows)}행)")
+    print(f"감지된 정지 배치: {len(tracker.records)}개")
+    print(f"저장: {args.out} (합성 영상), {args.csv} (좌표 {len(rows)}행), shots.csv (배치별 확률)")
 
 
 if __name__ == "__main__":
