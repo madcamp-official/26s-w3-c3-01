@@ -99,15 +99,50 @@ class LayoutTracker:
         return self.probs
 
 
-def draw_minimap(balls_tbl, w=400, h=200):
-    """balls_tbl: [(이름, conf, tx, ty)] 정규화 좌표 → 미니맵 이미지"""
-    mini = np.full((h, w, 3), (140, 90, 30), np.uint8)
-    cv2.rectangle(mini, (0, 0), (w - 1, h - 1), (255, 255, 255), 2)
-    for name, conf, tx, ty in balls_tbl:
-        p = (int(tx * w), int(ty * h))
-        cv2.circle(mini, p, 7, BGR.get(name, (0, 255, 0)), -1)
-        cv2.circle(mini, p, 7, (30, 30, 30), 1)
-    return mini
+def render_prediction_pane(balls_tbl, tracker, top_view, w, h):
+    """우측 예측 화면: 0~1 정규화 테이블 위에 공 위치·좌표·확률·추천 샷 표시."""
+    pane = np.full((h, w, 3), (35, 35, 35), np.uint8)
+    tw = min(w - 80, (h - 170) * 2)          # 테이블은 2:1 비율 유지
+    th = tw // 2
+    x0, y0 = (w - tw) // 2, 40
+    cv2.rectangle(pane, (x0, y0), (x0 + tw, y0 + th), (140, 90, 30), -1)
+    cv2.rectangle(pane, (x0, y0), (x0 + tw, y0 + th), (255, 255, 255), 3)
+
+    to_px = lambda tx, ty: (x0 + int(tx * tw), y0 + int(ty * th))
+    r = max(6, int(tw * 0.0108))             # 공 반지름 (실제 비율)
+    for name, _, tx, ty in balls_tbl:
+        p = to_px(tx, ty)
+        cv2.circle(pane, p, r, BGR.get(name, (0, 255, 0)), -1)
+        cv2.circle(pane, p, r, (30, 30, 30), 2)
+        cv2.putText(pane, f"({tx:.2f}, {ty:.2f})", (p[0] + r + 6, p[1] + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+    ty_text = y0 + th + 45
+    if not top_view:
+        cv2.putText(pane, "CAMERA CUT - coords excluded", (x0, ty_text),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 0, 255), 2)
+    elif tracker.probs:
+        cv2.putText(pane, f"3C prob  W {tracker.probs[0]:.1%} | Y {tracker.probs[1]:.1%}",
+                    (x0, ty_text), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 230, 80), 2)
+        for row, cue_name in enumerate(("white", "yellow")):
+            shot = tracker.best.get(cue_name)
+            if not shot or cue_name not in (tracker.last_layout or {}):
+                continue
+            deg, v, s, t = shot
+            cv2.putText(pane, f"{cue_name[0].upper()} best {deg:.0f}deg v{v:.1f} "
+                              f"side{s:+.1f} vert{t:+.1f}",
+                        (x0, ty_text + 35 + row * 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, BGR[cue_name], 2)
+            bx, by = tracker.last_layout[cue_name]
+            p1 = to_px(bx, by)
+            rad = np.deg2rad(deg)             # 2:1 비율이 유지되므로 각도 왜곡 없음
+            p2 = (int(p1[0] + 0.13 * tw * np.cos(rad)),
+                  int(p1[1] + 0.13 * tw * np.sin(rad)))
+            cv2.arrowedLine(pane, p1, p2, BGR[cue_name], 3, tipLength=0.25)
+    else:
+        cv2.putText(pane, "in play...", (x0, ty_text),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
+    return pane
 
 
 def main():
@@ -159,13 +194,13 @@ def main():
         for box in res.boxes:
             name = res.names[int(box.cls)]
             conf = float(box.conf)
-            cx, cy = box.xywh[0][:2].tolist()
-            balls.append((name, conf, cx, cy))
+            cx, cy, bw, bh = box.xywh[0].tolist()
+            balls.append((name, conf, cx, cy, bw, bh))
 
         if balls and top_view:
             tbl = px_to_table([[b[2], b[3]] for b in balls], corners)
             balls_tbl = [(n, c, float(tx), float(ty))
-                         for (n, c, _, _), (tx, ty) in zip(balls, tbl)]
+                         for (n, c, *_), (tx, ty) in zip(balls, tbl)]
         else:
             balls_tbl = []
 
@@ -174,49 +209,36 @@ def main():
                          round(conf, 3), round(tx, 4), round(ty, 4)])
 
         # 정지 배치 감지 → 시뮬레이션 확률 (탑뷰에서만)
-        probs = tracker.update(frame_idx, balls_tbl) if top_view else None
+        tracker.update(frame_idx, balls_tbl) if top_view else None
 
-        # 탐지 오버레이 + 우상단 미니맵 + 확률 바 합성
-        annotated = res.plot()
-        mini = draw_minimap(balls_tbl)
-        mh, mw = mini.shape[:2]
+        # 좌측: 원본 영상 + 공 박스 (신뢰도 대신 0~1 정규화 좌표 표시)
+        annotated = frame.copy()
+        for k, (name, _, cx, cy, bw, bh) in enumerate(balls):
+            color = BGR.get(name, (0, 255, 0))
+            p1 = (int(cx - bw / 2) - 4, int(cy - bh / 2) - 4)
+            p2 = (int(cx + bw / 2) + 4, int(cy + bh / 2) + 4)
+            cv2.rectangle(annotated, p1, p2, color, 3)
+            label = (f"({balls_tbl[k][2]:.2f}, {balls_tbl[k][3]:.2f})"
+                     if k < len(balls_tbl) else name)
+            org = (p1[0], p1[1] - 14)
+            cv2.putText(annotated, label, org, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 5)
+            cv2.putText(annotated, label, org, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
         if not top_view:
-            cv2.putText(mini, "CAMERA CUT", (mw // 2 - 90, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
             cv2.putText(annotated, "camera cut - coords excluded", (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
 
-        bar = np.full((88, mw, 3), (45, 45, 45), np.uint8)
-        if probs:
-            cv2.putText(bar, f"3C prob  W {probs[0]:.1%} | Y {probs[1]:.1%}",
-                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (80, 230, 80), 2)
-            # 추천 샷(가장 약한 힘으로 성공하는 조합) + 미니맵에 조준 방향 화살표
-            for row, cue_name in enumerate(("white", "yellow")):
-                shot = tracker.best.get(cue_name)
-                if not shot or cue_name not in tracker.last_layout:
-                    continue
-                deg, v, s, t = shot
-                cv2.putText(bar, f"{cue_name[0].upper()} best {deg:.0f}deg v{v:.1f} "
-                                 f"side{s:+.1f} vert{t:+.1f}",
-                            (10, 52 + row * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            BGR[cue_name], 1)
-                bx, by = tracker.last_layout[cue_name]
-                p1 = (int(bx * mw), int(by * mh))
-                rad = np.deg2rad(deg)   # 미니맵이 실제 테이블과 같은 2:1 비율이라 각도 보존
-                p2 = (int(p1[0] + 55 * np.cos(rad)), int(p1[1] + 55 * np.sin(rad)))
-                cv2.arrowedLine(mini, p1, p2, BGR[cue_name], 2, tipLength=0.25)
-        else:
-            cv2.putText(bar, "in play...", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 200, 200), 2)
-        panel = np.vstack([mini, bar])
-        ph, pw_ = panel.shape[:2]
-        annotated[10:10 + ph, annotated.shape[1] - pw_ - 10:annotated.shape[1] - 10] = panel
+        # 좌우 1:1 합성 (좌: 당구 영상, 우: 예측 화면)
+        out_h = 720
+        left_w = int(round(annotated.shape[1] * out_h / annotated.shape[0] / 2)) * 2
+        left = cv2.resize(annotated, (left_w, out_h))
+        right = render_prediction_pane(balls_tbl, tracker, top_view, left_w, out_h)
+        composed = np.hstack([left, right])
 
         if writer is None:
-            h, w = annotated.shape[:2]
+            h, w = composed.shape[:2]
             writer = cv2.VideoWriter(args.out, cv2.VideoWriter_fourcc(*"mp4v"),
                                      fps / args.every, (w, h))
-        writer.write(annotated)
+        writer.write(composed)
         n_proc += 1
         n_top += top_view
 
