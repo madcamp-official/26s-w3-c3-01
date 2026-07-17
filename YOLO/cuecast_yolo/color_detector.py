@@ -116,20 +116,37 @@ class ColorBallDetector:
                 # 고정 카메라는 같은 기준점을 사용해야 좌표 흔들림이 줄어든다.
                 warp_corners = self.expected_corners
 
-            destination = np.float32(
-                [
-                    [0, 0],
-                    [WARP_WIDTH - 1, 0],
-                    [WARP_WIDTH - 1, WARP_HEIGHT - 1],
-                    [0, WARP_HEIGHT - 1],
-                ]
-            )
-            matrix = cv2.getPerspectiveTransform(warp_corners, destination)
-            warped = cv2.warpPerspective(image, matrix, (WARP_WIDTH, WARP_HEIGHT))
-            return TableView(
-                corners=warp_corners, warped=warped, image_to_table=matrix
-            )
+            return self.table_view_from_corners(image, warp_corners)
         return None
+
+    @staticmethod
+    def table_view_from_corners(
+        image: np.ndarray, corners: np.ndarray
+    ) -> TableView:
+        """Warp a frame with previously calibrated, fixed table corners."""
+
+        source = np.asarray(corners, dtype=np.float32)
+        if source.shape != (4, 2):
+            raise ValueError("table corners must have shape (4, 2)")
+        destination = np.float32(
+            [
+                [0, 0],
+                [WARP_WIDTH - 1, 0],
+                [WARP_WIDTH - 1, WARP_HEIGHT - 1],
+                [0, WARP_HEIGHT - 1],
+            ]
+        )
+        matrix = cv2.getPerspectiveTransform(source, destination)
+        warped = cv2.warpPerspective(image, matrix, (WARP_WIDTH, WARP_HEIGHT))
+        return TableView(corners=source, warped=warped, image_to_table=matrix)
+
+    def detect_fixed(
+        self, image: np.ndarray, corners: np.ndarray
+    ) -> tuple[TableView, dict[str, BallDetection]]:
+        """Detect balls without re-running table segmentation."""
+
+        table = self.table_view_from_corners(image, corners)
+        return table, self.detect_in_table(table.warped)
 
     def detect(
         self, image: np.ndarray
@@ -138,8 +155,15 @@ class ColorBallDetector:
         if table is None:
             return None, {}
 
-        hsv = cv2.cvtColor(table.warped, cv2.COLOR_BGR2HSV)
-        b, g, r = cv2.split(table.warped)
+        return table, self.detect_in_table(table.warped)
+
+    def detect_in_table(
+        self, warped: np.ndarray
+    ) -> dict[str, BallDetection]:
+        """Detect the three balls in a rectified 2:1 table image."""
+
+        hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+        b, g, r = cv2.split(warped)
         blue_background = cv2.inRange(hsv, (85, 55, 45), (115, 255, 255))
         dark_background = cv2.inRange(hsv, (0, 0, 0), (179, 255, 72))
         masks = {
@@ -188,7 +212,7 @@ class ColorBallDetector:
             detection.confidence < 0.72 for detection in detections.values()
         ):
             hough_candidates = self._find_hough_candidates(
-                table.warped,
+                warped,
                 masks,
                 blue_background,
                 dark_background,
@@ -201,7 +225,7 @@ class ColorBallDetector:
                     or candidates[0].confidence > detections[name].confidence
                 ):
                     detections[name] = candidates[0]
-        return table, detections
+        return detections
 
     def _find_candidates(
         self,

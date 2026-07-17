@@ -30,10 +30,28 @@ def draw_virtual_table(
 
     A ball value may be ``None`` when that ball was not detected.
     """
+    canvas = render_virtual_table(coordinates)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not cv2.imwrite(str(output_path), canvas):
+        raise OSError(f"Failed to write image: {output_path}")
+
+    return canvas
+
+
+def render_virtual_table(
+    coordinates: dict[str, Any],
+    *,
+    compact_labels: bool = False,
+    show_title: bool = True,
+) -> np.ndarray:
+    """Render a virtual table in memory without writing an image file."""
+
     width, height = 1400, 800
     canvas = np.full((height, width, 3), 32, dtype=np.uint8)
 
-    outer = (90, 100, 1310, 690)
+    outer = (90, 90, 1310, 742)
     rail = 42
     play = (
         outer[0] + rail,
@@ -42,16 +60,17 @@ def draw_virtual_table(
         outer[3] - rail,
     )
 
-    cv2.putText(
-        canvas,
-        "Automatic Table + Ball Coordinate Result",
-        (90, 58),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (245, 245, 245),
-        2,
-        cv2.LINE_AA,
-    )
+    if show_title:
+        cv2.putText(
+            canvas,
+            "Automatic Table + Ball Coordinate Result",
+            (90, 58),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (245, 245, 245),
+            2,
+            cv2.LINE_AA,
+        )
     cv2.rectangle(
         canvas,
         (outer[0], outer[1]),
@@ -104,8 +123,15 @@ def draw_virtual_table(
         cv2.circle(canvas, (x, y), 19, (15, 15, 15), 2, cv2.LINE_AA)
         cv2.circle(canvas, (x - 6, y - 7), 5, (255, 255, 255), -1)
 
-        label = f"{name.upper()} ({nx:.4f}, {ny:.4f})"
-        label_position = (min(x + 28, width - 320), max(y - 12, 30))
+        label = (
+            name[0].upper()
+            if compact_labels
+            else f"{name.upper()} ({nx:.4f}, {ny:.4f})"
+        )
+        label_position = (
+            min(x + 28, width - (45 if compact_labels else 320)),
+            max(y - 12, 30),
+        )
         cv2.putText(
             canvas,
             label,
@@ -126,11 +152,5 @@ def draw_virtual_table(
             1,
             cv2.LINE_AA,
         )
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not cv2.imwrite(str(output_path), canvas):
-        raise OSError(f"Failed to write image: {output_path}")
 
     return canvas
