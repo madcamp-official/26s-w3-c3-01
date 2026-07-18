@@ -17,6 +17,7 @@ from cuecast_yolo.shot_probability import (
     load_continuous_model,
     load_shot_records,
 )
+from cuecast_yolo.live_youtube import YoutubeLiveWorker
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -80,6 +81,7 @@ def create_handler(
     ui_path: Path,
     detections: DetectionStore,
     video_analyzer: VideoPositionAnalyzer,
+    live_worker: YoutubeLiveWorker,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, payload: object, status: int = HTTPStatus.OK) -> None:
@@ -107,6 +109,9 @@ def create_handler(
                 return
             if path == "/api/v1/detection/latest":
                 self._send_json(detections.get())
+                return
+            if path == "/api/v1/youtube/live/status":
+                self._send_json(live_worker.status())
                 return
             if path in ("/", "/index.html"):
                 body = ui_path.read_bytes()
@@ -172,6 +177,25 @@ def create_handler(
                     )
                     self._send_json(stored, HTTPStatus.CREATED)
                     return
+                if path == "/api/v1/youtube/live/start":
+                    shooter = str(payload.get("shooter", "white"))
+                    if shooter not in ("white", "yellow"):
+                        raise ValueError("shooter는 white 또는 yellow여야 합니다")
+                    live_worker.start(
+                        str(payload["url"]),
+                        float(payload.get("timestamp_seconds", 0.0)),
+                        shooter,
+                    )
+                    self._send_json(live_worker.status(), HTTPStatus.ACCEPTED)
+                    return
+                if path == "/api/v1/youtube/live/stop":
+                    live_worker.stop()
+                    self._send_json(live_worker.status())
+                    return
+                if path == "/api/v1/youtube/live/shooter":
+                    live_worker.set_shooter(str(payload["shooter"]))
+                    self._send_json(live_worker.status())
+                    return
                 self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 self._send_json(
@@ -214,11 +238,41 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     service = ProbabilityService(args.shots.resolve(), args.model.resolve())
+    detections = DetectionStore()
+    video_analyzer = VideoPositionAnalyzer(table_config=args.table.resolve())
+
+    def publish_live_layout(
+        positions: dict[str, tuple[float, float]],
+        shooter: str,
+        analysis: dict[str, object],
+    ) -> None:
+        before = {
+            color: list(positions[f"{color}_ball"])
+            for color in ("white", "yellow", "red")
+        }
+        prediction = service.predict(
+            {
+                "before": before,
+                "shooter": shooter,
+                "position_error_mm": 25.0,
+            }
+        )
+        detections.put(
+            {
+                "before": before,
+                "shooter": shooter,
+                "prediction": prediction,
+                "analysis": analysis,
+            }
+        )
+
+    live_worker = YoutubeLiveWorker(video_analyzer, publish_live_layout)
     handler = create_handler(
         service,
         args.ui.resolve(),
-        DetectionStore(),
-        VideoPositionAnalyzer(table_config=args.table.resolve()),
+        detections,
+        video_analyzer,
+        live_worker,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(
@@ -230,6 +284,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        live_worker.stop()
         server.server_close()
 
 

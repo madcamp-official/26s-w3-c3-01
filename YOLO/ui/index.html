@@ -55,6 +55,7 @@
   <section class="toolbar">
     <label>YouTube URL<input id="youtube-url" type="url" placeholder="https://www.youtube.com/watch?v=..."></label>
     <button class="primary" id="connect">영상 연결</button>
+    <button id="live-toggle" disabled>자동 분석 대기</button>
     <button id="sample">샘플 검출</button>
   </section>
   <section class="status"><i class="dot" id="dot"></i><strong id="status">엔진 연결 확인 중</strong><span id="status-detail"></span></section>
@@ -91,13 +92,16 @@
     {white:[.9052,.2854],yellow:[.5463,.9336],red:[.964,.3427]},
     {white:[.9057,.2848],yellow:[.9244,.3762],red:[.5551,.8595]}
   ];
-  let balls=samples[0],sampleIndex=0,shooter='white',detectionVersion=0,formationRevision=0,ytPlayer=null,ytApiReady=false,isScrubbing=false;
+  let balls=samples[0],sampleIndex=0,shooter='white',detectionVersion=0,formationRevision=0,ytPlayer=null,ytApiReady=false,isScrubbing=false,liveRunning=false,liveSyncTimer=null;
   const $=id=>document.getElementById(id);
   window.onYouTubeIframeAPIReady=()=>{ytApiReady=true};
   function videoId(value){try{const u=new URL(value.trim());if(u.hostname.includes('youtu.be'))return u.pathname.split('/').filter(Boolean)[0];if(u.searchParams.get('v'))return u.searchParams.get('v');const p=u.pathname.split('/').filter(Boolean),i=p.findIndex(x=>['embed','shorts','live'].includes(x));return i>=0?p[i+1]:null}catch{return /^[\w-]{11}$/.test(value.trim())?value.trim():null}}
   function formatTime(seconds){seconds=Math.max(0,Math.round(Number(seconds)||0));const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=seconds%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
   function parseTime(value){const parts=value.trim().split(':').map(Number);if(parts.some(Number.isNaN)||parts.length<1||parts.length>3)return null;return parts.reduce((total,n)=>total*60+n,0)}
   function syncPlayerTime(){if(!ytPlayer||typeof ytPlayer.getCurrentTime!=='function')return;const duration=ytPlayer.getDuration()||0,current=ytPlayer.getCurrentTime()||0;$('duration').textContent=formatTime(duration);$('position-range').max=Math.max(duration,1);if(!isScrubbing){$('position-range').value=current;$('current-time').textContent=formatTime(current)}}
+  async function startLive(seconds){const url=$('youtube-url').value.trim();if(!videoId(url))return;$('live-toggle').disabled=false;$('live-toggle').textContent='자동 연결 중';$('analysis-state').textContent='실시간 연결 중';try{const response=await fetch('/api/v1/youtube/live/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,timestamp_seconds:Number(seconds)||0,shooter})});const data=await response.json();if(!response.ok)throw new Error(data.detail||data.error);liveRunning=true;$('live-toggle').textContent='자동 분석 중지'}catch(error){liveRunning=false;$('live-toggle').textContent='자동 분석 재시작';$('analysis-state').textContent='실시간 연결 실패';$('status-detail').textContent=error.message}}
+  function syncLiveTo(seconds){clearTimeout(liveSyncTimer);liveSyncTimer=setTimeout(()=>startLive(seconds),250)}
+  async function stopLive(){await fetch('/api/v1/youtube/live/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});liveRunning=false;$('live-toggle').textContent='자동 분석 시작';$('analysis-state').textContent='자동 분석 정지'}
   function renderBalls(){
     document.querySelectorAll('.ball').forEach(el=>{const c=['white','yellow','red'].find(x=>el.classList.contains(x));el.style.left=`${balls[c][0]*100}%`;el.style.top=`${balls[c][1]*100}%`;el.classList.toggle('cue',c===shooter)});
     $('white').classList.toggle('active',shooter==='white');$('yellow').classList.toggle('active',shooter==='yellow');
@@ -117,18 +121,20 @@
       applyPrediction(data);
     }catch(error){$('status').textContent='엔진 연결 실패';$('status-detail').textContent=error.message;$('dot').classList.remove('connected')}
   }
-  function selectCue(value){shooter=value;formationRevision++;renderBalls();predict()}
-  $('connect').onclick=()=>{const id=videoId($('youtube-url').value);if(!id){$('status').textContent='YouTube URL 확인 필요';return}if(!ytApiReady||!window.YT){$('status').textContent='YouTube 플레이어 준비 중';$('status-detail').textContent='잠시 후 다시 눌러주세요';return}$('placeholder').classList.add('hidden');if(ytPlayer&&typeof ytPlayer.loadVideoById==='function'){ytPlayer.loadVideoById(id);return}ytPlayer=new YT.Player('player',{videoId:id,playerVars:{autoplay:1,mute:1,playsinline:1},events:{onReady:event=>{event.target.mute();$('position-range').disabled=false;$('seek').disabled=false;$('analyze').disabled=false;syncPlayerTime()},onStateChange:syncPlayerTime}})};
+  function selectCue(value){shooter=value;formationRevision++;renderBalls();predict();if(liveRunning)fetch('/api/v1/youtube/live/shooter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shooter})})}
+  $('connect').onclick=()=>{const id=videoId($('youtube-url').value);if(!id){$('status').textContent='YouTube URL 확인 필요';return}if(!ytApiReady||!window.YT){$('status').textContent='YouTube 플레이어 준비 중';$('status-detail').textContent='잠시 후 다시 눌러주세요';return}$('placeholder').classList.add('hidden');if(ytPlayer&&typeof ytPlayer.loadVideoById==='function'){ytPlayer.loadVideoById(id);syncLiveTo(0);return}ytPlayer=new YT.Player('player',{videoId:id,playerVars:{autoplay:1,mute:1,playsinline:1},events:{onReady:event=>{event.target.mute();$('position-range').disabled=false;$('seek').disabled=false;$('analyze').disabled=false;syncPlayerTime();syncLiveTo(event.target.getCurrentTime()||0)},onStateChange:syncPlayerTime}})};
   $('position-range').onpointerdown=()=>{isScrubbing=true};
   $('position-range').oninput=event=>{$('current-time').textContent=formatTime(event.target.value)};
-  $('position-range').onchange=event=>{isScrubbing=false;const seconds=Number(event.target.value);if(ytPlayer)ytPlayer.seekTo(seconds,true);$('position-text').value=formatTime(seconds)};
-  $('seek').onclick=()=>{const seconds=parseTime($('position-text').value);if(seconds===null){$('status').textContent='영상 위치 형식 확인 필요';return}$('position-range').value=seconds;$('current-time').textContent=formatTime(seconds);if(ytPlayer)ytPlayer.seekTo(seconds,true)};
+  $('position-range').onchange=event=>{isScrubbing=false;const seconds=Number(event.target.value);if(ytPlayer)ytPlayer.seekTo(seconds,true);$('position-text').value=formatTime(seconds);syncLiveTo(seconds)};
+  $('seek').onclick=()=>{const seconds=parseTime($('position-text').value);if(seconds===null){$('status').textContent='영상 위치 형식 확인 필요';return}$('position-range').value=seconds;$('current-time').textContent=formatTime(seconds);if(ytPlayer)ytPlayer.seekTo(seconds,true);syncLiveTo(seconds)};
+  $('live-toggle').onclick=()=>liveRunning?stopLive():startLive(Number($('position-range').value));
   $('analyze').onclick=async()=>{const url=$('youtube-url').value.trim();const seconds=Number($('position-range').value);if(!videoId(url)){$('status').textContent='YouTube URL 확인 필요';return}$('analyze').disabled=true;$('analysis-state').textContent='앞 구간 검출 중';$('status').textContent='리플레이 직전 공 분석 중';$('status-detail').textContent=`${formatTime(seconds)} 이전 12초 탐색`;try{const response=await fetch('/api/v1/youtube/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,timestamp_seconds:seconds,lookback_seconds:12,shooter,position_error_mm:25})});const data=await response.json();if(!response.ok)throw new Error(data.detail||data.error);detectionVersion=data.version;balls=data.before;formationRevision++;renderBalls();applyPrediction(data.prediction);const a=data.analysis;$('analysis-state').textContent=`${formatTime(a.detectedAtSeconds)} 배치`;$('status-detail').textContent=`선택 ${formatTime(a.selectedSeconds)} · 검출 ${formatTime(a.detectedAtSeconds)} · 신뢰도 ${(a.detectionConfidence*100).toFixed(0)}%`}catch(error){$('analysis-state').textContent='검출 실패';$('status').textContent='공 배치를 찾지 못함';$('status-detail').textContent=error.message}finally{$('analyze').disabled=false}};
   $('sample').onclick=()=>{sampleIndex=(sampleIndex+1)%samples.length;balls=samples[sampleIndex];formationRevision++;renderBalls();predict()};
   $('white').onclick=()=>selectCue('white');$('yellow').onclick=()=>selectCue('yellow');
   window.cuecastUpdateFormation=value=>{balls=value;formationRevision++;renderBalls();predict()};
-  async function pollDetections(){try{const d=await fetch('/api/v1/detection/latest').then(r=>r.json());if(d.version>detectionVersion&&d.before){detectionVersion=d.version;balls=d.before;shooter=d.shooter||shooter;formationRevision++;renderBalls();if(d.prediction)applyPrediction(d.prediction);else predict();if(d.analysis)$('analysis-state').textContent=`${formatTime(d.analysis.detectedAtSeconds)} 배치`}}catch{}setTimeout(pollDetections,750)}
-  setInterval(syncPlayerTime,500);renderBalls();predict();pollDetections();
+  async function pollDetections(){try{const d=await fetch('/api/v1/detection/latest').then(r=>r.json());if(d.version>detectionVersion&&d.before){detectionVersion=d.version;balls=d.before;shooter=d.shooter||shooter;formationRevision++;renderBalls();if(d.prediction)applyPrediction(d.prediction);else predict();if(d.analysis)$('analysis-state').textContent=`${d.analysis.mode==='live'?'자동 · ':''}${formatTime(d.analysis.detectedAtSeconds)} 배치`}}catch{}setTimeout(pollDetections,750)}
+  async function pollLive(){try{const s=await fetch('/api/v1/youtube/live/status').then(r=>r.json());liveRunning=Boolean(s.running);if(s.state==='running'){$('live-toggle').textContent='자동 분석 중지';$('analysis-state').textContent=s.lastLayoutSeconds!=null?`자동 · ${formatTime(s.lastLayoutSeconds)} 배치`:`자동 분석 중 · ${formatTime(s.positionSeconds)}`}else if(s.state==='connecting'){$('live-toggle').textContent='자동 연결 중'}else if(s.state==='error'){$('live-toggle').textContent='자동 분석 재시작';$('analysis-state').textContent='자동 분석 오류';$('status-detail').textContent=s.lastError||''}else if(!liveRunning&&s.state!=='idle'){$('live-toggle').textContent='자동 분석 시작'}}catch{}setTimeout(pollLive,1000)}
+  setInterval(syncPlayerTime,500);renderBalls();predict();pollDetections();pollLive();
 </script>
 </body>
 </html>
