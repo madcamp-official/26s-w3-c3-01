@@ -4,14 +4,14 @@
 import argparse
 import csv
 import time
-from collections import deque
+from collections import Counter, deque
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
 from detect_pipeline import find_table_corners, px_to_table
-from simulate import estimate_probability, pick_robust_shot
+from simulate import TABLE_H, TABLE_W, estimate_probability, pick_robust_shot
 
 MODEL_PATH = "best_3cls.pt"
 BGR = {"white": (255, 255, 255), "yellow": (0, 180, 255), "red": (0, 0, 220)}
@@ -48,6 +48,73 @@ def plausible_top_view(corners, frame_shape):
     return 1.6 < aspect < 2.4 and horizontal and area > 0.2
 
 
+# ---------- 큐대 방향 검출 ----------
+class CueDetector:
+    """정지 배치 중 프레임에서 큐대(긴 직선)를 찾아 조준 방향을 추정한다.
+    직선의 연장선이 수구(white/yellow) 가까이 지나면 그 공을 치는 것으로 판정.
+    최근 프레임 다수결+원형 평균으로 안정화. 반환: (수구 이름, 조준 각도 deg)"""
+    LINE_DIST = 28      # 직선-수구 중심 허용 거리 (px)
+    TIP_MIN, TIP_MAX = 20, 450   # 큐 끝-수구 거리 범위 (px)
+
+    def __init__(self):
+        self.hist = deque(maxlen=7)
+
+    def reset(self):
+        self.hist.clear()
+
+    def _detect(self, frame, corners, balls_px):
+        scale = 0.5
+        small = cv2.resize(frame, None, fx=scale, fy=scale)
+        edges = cv2.Canny(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 60, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 360, threshold=80,
+                                minLineLength=120, maxLineGap=8)
+        if lines is None:
+            return None
+
+        cand = None  # (직선-공 거리, 수구 이름, 큐 뒤끝 px, 공 px)
+        for x1, y1, x2, y2 in lines.reshape(-1, 4) / scale:
+            p1, p2 = np.array([x1, y1]), np.array([x2, y2])
+            seg = p2 - p1
+            seg_len = np.linalg.norm(seg)
+            if seg_len < 1:
+                continue
+            for name, ball in balls_px.items():
+                ball = np.array(ball)
+                # 공 중심에서 직선까지 수직 거리 (2D 외적)
+                rel = ball - p1
+                d_line = abs(seg[0] * rel[1] - seg[1] * rel[0]) / seg_len
+                if d_line > self.LINE_DIST:
+                    continue
+                d1, d2 = np.linalg.norm(ball - p1), np.linalg.norm(ball - p2)
+                tip, butt = (p1, p2) if d1 < d2 else (p2, p1)
+                d_tip = min(d1, d2)
+                if not (self.TIP_MIN < d_tip < self.TIP_MAX):
+                    continue
+                # 큐는 공 바깥에서 공을 향해야 함 (공이 선분 내부에 있으면 제외)
+                if np.dot(ball - tip, tip - butt) < 0:
+                    continue
+                if cand is None or d_line < cand[0]:
+                    cand = (d_line, name, butt, ball)
+        if cand is None:
+            return None
+
+        _, name, butt, ball = cand
+        # 픽셀 방향 → 테이블(미터) 방향으로 변환해 각도 계산
+        (bx, by), (tx, ty) = px_to_table([butt, ball], corners)
+        dx, dy = (tx - bx) * TABLE_W, (ty - by) * TABLE_H
+        return name, float(np.degrees(np.arctan2(dy, dx)) % 360)
+
+    def update(self, frame, corners, balls_px):
+        self.hist.append(self._detect(frame, corners, balls_px))
+        dets = [d for d in self.hist if d]
+        if len(dets) < 3:
+            return None
+        ball = Counter(d[0] for d in dets).most_common(1)[0][0]
+        angs = np.deg2rad([d[1] for d in dets if d[0] == ball])
+        mean = np.degrees(np.arctan2(np.sin(angs).mean(), np.cos(angs).mean())) % 360
+        return ball, float(mean)
+
+
 # ---------- 샷 직전 배치 감지 + 확률 계산 (시뮬레이션 엔진 통합) ----------
 class LayoutTracker:
     """공 3개가 모두 멈춘 '샷 직전 배치'를 감지하고, 배치가 바뀔 때마다
@@ -64,6 +131,7 @@ class LayoutTracker:
         self.probs = None
         self.best = {}      # 수구별 추천 샷 (성공 각도 폭 최대): (각도, 속도, side, vert, ±폭)
         self.fans = {}      # 수구별 성공 각도 전체 목록 (부채살 표시용)
+        self.shots = {}     # 수구별 성공 샷 전체 (조준 방향 조건부 확률 집계용)
         self.records = []   # (frame, layout, p_white, p_yellow)
 
     def update(self, frame_idx, balls_tbl):
@@ -97,16 +165,26 @@ class LayoutTracker:
             step = 360.0 / self.n_angles
             for cue_name, shots in (("white", shots_w), ("yellow", shots_y)):
                 self.best[cue_name], self.fans[cue_name] = pick_robust_shot(shots, step)
+                self.shots[cue_name] = shots
             self.records.append((frame_idx, layout, p_w, p_y))
             print(f"  프레임 {frame_idx}: 새 배치 감지 → white {p_w:.1%} / yellow {p_y:.1%}")
         return self.probs
 
+    def aim_prob(self, cue_name, aim_deg, tol=9.0):
+        """저장된 성공 샷에서 조준 방향 ±tol 윈도우의 성공 비율 집계 (재시뮬레이션 없음)."""
+        step = 360.0 / self.n_angles
+        n_win = (2 * int(tol / step) + 1) * 27      # 윈도우 내 각도 샘플 x (힘3 x 사이드3 x 상하3)
+        hits = sum(1 for s in self.shots.get(cue_name, [])
+                   if min((s[0] - aim_deg) % 360, (aim_deg - s[0]) % 360) <= tol)
+        return hits / n_win
 
-def render_prediction_pane(balls_tbl, tracker, top_view, still, w, h):
+
+def render_prediction_pane(balls_tbl, tracker, top_view, still, cue_aim, aim_p, w, h):
     """우측 예측 화면: 0~1 정규화 테이블 위에 공 위치·좌표·확률·추천 샷 표시.
-    still=False(공 이동 중)면 확률·부채살 대신 in play 표시."""
+    still=False(공 이동 중)면 확률·부채살 대신 in play 표시.
+    cue_aim=(수구, 각도)가 있으면 조준 방향과 그 방향의 조건부 확률 표시."""
     pane = np.full((h, w, 3), (35, 35, 35), np.uint8)
-    tw = min(w - 80, (h - 170) * 2)          # 테이블은 2:1 비율 유지
+    tw = min(w - 80, (h - 200) * 2)          # 테이블은 2:1 비율 유지
     th = tw // 2
     x0, y0 = (w - tw) // 2, 40
     cv2.rectangle(pane, (x0, y0), (x0 + tw, y0 + th), (140, 90, 30), -1)
@@ -158,6 +236,17 @@ def render_prediction_pane(balls_tbl, tracker, top_view, still, w, h):
             p2 = (int(p1[0] + 0.13 * tw * np.cos(rad)),
                   int(p1[1] + 0.13 * tw * np.sin(rad)))
             cv2.arrowedLine(pane, p1, p2, BGR[cue_name], 3, tipLength=0.25)
+
+        # 검출된 큐대 조준 방향 + 그 방향의 조건부 확률 (마젠타)
+        if cue_aim and aim_p is not None and cue_aim[0] in (tracker.last_layout or {}):
+            name, deg = cue_aim
+            p1 = to_px(*tracker.last_layout[name])
+            rad = np.deg2rad(deg)
+            p2 = (int(p1[0] + 0.16 * tw * np.cos(rad)),
+                  int(p1[1] + 0.16 * tw * np.sin(rad)))
+            cv2.arrowedLine(pane, p1, p2, (255, 0, 255), 3, tipLength=0.2)
+            cv2.putText(pane, f"AIM {name[0].upper()} {deg:.0f}deg -> {aim_p:.1%}",
+                        (x0, ty_text + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
     else:
         cv2.putText(pane, "in play...", (x0, ty_text),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
@@ -181,7 +270,9 @@ def main():
 
     model = YOLO(MODEL_PATH)
     corners = None          # 방송 화면에서 당구대는 고정 → 첫 프레임에서 1번만 검출
+    m_inv = None            # 테이블 정규화 좌표 → 픽셀 역변환 (조준선 표시용)
     tracker = LayoutTracker()
+    cue_detector = CueDetector()
     writer = None
     rows = []
     n_proc, n_top, t0 = 0, 0, time.time()
@@ -202,6 +293,8 @@ def main():
         if corners is None:
             if plausible_top_view(fast, frame.shape):
                 corners = find_table_corners(frame)   # 기준은 원본 해상도로 정밀 검출
+                m_inv = cv2.getPerspectiveTransform(
+                    np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]), corners)
                 print(f"당구대 꼭짓점 (프레임 {frame_idx}):", corners.astype(int).tolist())
             top_view = False
         else:
@@ -230,6 +323,20 @@ def main():
         # 정지 배치 감지 → 시뮬레이션 확률 (탑뷰에서만). 반환값이 있으면 정지 상태
         still = bool(tracker.update(frame_idx, balls_tbl)) if top_view else False
 
+        # 정지 중에만 큐대 방향 검출 → 조준 방향의 조건부 확률
+        cue_aim, aim_p = None, None
+        if still:
+            balls_px = {}
+            for name, conf, cx, cy, *_ in balls:
+                if name in ("white", "yellow") and conf > balls_px.get(name, (0,))[0]:
+                    balls_px[name] = (conf, cx, cy)
+            cue_aim = cue_detector.update(frame, corners,
+                                          {n: v[1:] for n, v in balls_px.items()})
+            if cue_aim:
+                aim_p = tracker.aim_prob(*cue_aim)
+        else:
+            cue_detector.reset()
+
         # 좌측: 원본 영상 + 공 박스 (신뢰도 대신 0~1 정규화 좌표 표시)
         annotated = frame.copy()
         for k, (name, _, cx, cy, bw, bh) in enumerate(balls):
@@ -246,11 +353,24 @@ def main():
             cv2.putText(annotated, "camera cut - coords excluded", (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
 
+        # 검출된 조준선을 원본에도 그려 실제 큐대와 겹치는지 확인 가능하게
+        if cue_aim and m_inv is not None and cue_aim[0] in (tracker.last_layout or {}):
+            name, deg = cue_aim
+            bx, by = tracker.last_layout[name]
+            rad = np.deg2rad(deg)
+            end = ((bx * TABLE_W + 0.6 * np.cos(rad)) / TABLE_W,
+                   (by * TABLE_H + 0.6 * np.sin(rad)) / TABLE_H)
+            pts = cv2.perspectiveTransform(
+                np.float32([[bx, by], end]).reshape(-1, 1, 2), m_inv).reshape(-1, 2)
+            cv2.arrowedLine(annotated, tuple(pts[0].astype(int)), tuple(pts[1].astype(int)),
+                            (255, 0, 255), 4, tipLength=0.2)
+
         # 좌우 1:1 합성 (좌: 당구 영상, 우: 예측 화면)
         out_h = 720
         left_w = int(round(annotated.shape[1] * out_h / annotated.shape[0] / 2)) * 2
         left = cv2.resize(annotated, (left_w, out_h))
-        right = render_prediction_pane(balls_tbl, tracker, top_view, still, left_w, out_h)
+        right = render_prediction_pane(balls_tbl, tracker, top_view, still,
+                                       cue_aim, aim_p, left_w, out_h)
         composed = np.hstack([left, right])
 
         if writer is None:
