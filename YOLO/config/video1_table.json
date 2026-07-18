@@ -1,4 +1,6 @@
 {
+  "reference_width": 640,
+  "reference_height": 360,
   "corners": [
     [134, 73],
     [501, 73],
