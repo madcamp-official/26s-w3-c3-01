@@ -4,6 +4,9 @@
 # 작업 추가:
 #   echo "https://www.youtube.com/watch?v=XXXX" > jobs/pending/작업이름.txt  (한 줄에 링크 1개, 여러 줄 가능)
 # 결과: results/<video_id>/turns.jsonl, turns.csv
+#
+# 재처리 방지: 이미 추출된 영상(= S3 또는 로컬 results 에 turns.jsonl 존재)은 자동으로 건너뛴다.
+# 다시 추출하고 싶으면 FORCE=1 로 실행:  FORCE=1 source db/db.env && venv/bin/python src/process_queue.py
 import os
 import re
 import shutil
@@ -63,8 +66,29 @@ def video_id_of(url):
     return m.group(1) if m else re.sub(r"\W", "_", url)[-20:]
 
 
+def already_processed(vid):
+    """이미 추출된 영상인지 판정해 재처리를 막는다.
+    판정 우선순위: (1) S3 에 results/<vid>/turns.jsonl 존재  (2) 로컬 results/<vid>/turns.jsonl 존재.
+    FORCE=1 이면 항상 False 를 반환해 강제로 재처리한다."""
+    if os.environ.get("FORCE") == "1":
+        return False
+    if S3_BUCKET:
+        try:
+            import boto3
+            bucket = S3_BUCKET[len("s3://"):] if S3_BUCKET.startswith("s3://") else S3_BUCKET
+            s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION") or None)
+            s3.head_object(Bucket=bucket, Key=f"{S3_PREFIX}/{vid}/turns.jsonl")
+            return True  # S3에 결과가 있음 = DB에 반영됐거나 다음 cron에 반영될 것
+        except Exception:
+            pass  # 없음(404)이거나 조회 실패 → 로컬 확인으로 폴백
+    return os.path.exists(os.path.join(RESULTS, vid, "turns.jsonl"))
+
+
 def process_url(url):
     vid = video_id_of(url)
+    if already_processed(vid):
+        log(f"이미 처리된 영상 — 건너뜀: {vid}  ({url})   [재처리하려면 FORCE=1]")
+        return
     video_path = os.path.join(VIDEOS, f"{vid}.mp4")
     outdir = os.path.join(RESULTS, vid)
 
