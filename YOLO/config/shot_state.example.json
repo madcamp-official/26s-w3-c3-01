@@ -1,0 +1,13 @@
+{
+  "predictionId": "match_001_set_2_inning_8_shot_1",
+  "cueBall": "white",
+  "before": {
+    "cue": {"xMm": 612.4, "yMm": 1032.8},
+    "object1": {"xMm": 1841.2, "yMm": 382.5},
+    "object2": {"xMm": 2378.6, "yMm": 831.4}
+  },
+  "quality": {
+    "positionErrorMm": 18.4,
+    "detectionConfidence": 0.94
+  }
+}

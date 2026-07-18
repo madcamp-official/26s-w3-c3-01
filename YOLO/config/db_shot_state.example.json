@@ -1,0 +1,12 @@
+{
+  "video_id": "screenrec2",
+  "turn": 1,
+  "epoch": 0,
+  "shooter": "white",
+  "before": {
+    "white": [0.5583, 0.9381],
+    "yellow": [0.2336, 0.7072],
+    "red": [0.9643, 0.3434]
+  },
+  "position_error_mm": 25.0
+}
