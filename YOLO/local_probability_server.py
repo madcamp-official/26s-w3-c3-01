@@ -76,10 +76,17 @@ class DetectionStore:
         with self._lock:
             return dict(self._value or {"version": self._version})
 
+    def clear(self) -> dict[str, object]:
+        with self._lock:
+            self._version += 1
+            self._value = {"version": self._version, "pending": True}
+            return dict(self._value)
+
 
 def create_handler(
     service: ProbabilityService,
     ui_path: Path,
+    extension_dir: Path,
     detections: DetectionStore,
     video_analyzer: VideoPositionAnalyzer,
     live_worker: YoutubeLiveWorker,
@@ -91,6 +98,7 @@ def create_handler(
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
 
@@ -123,7 +131,45 @@ def create_handler(
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path == "/extension-preview":
+                body = (extension_dir / "sidepanel.html").read_bytes().replace(
+                    b"<head>", b'<head><base href="/extension/">', 1
+                )
+                body = body.replace(
+                    b"</head>",
+                    b"<style>.app{max-width:480px;margin-left:auto;margin-right:auto}</style></head>",
+                    1,
+                )
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path.startswith("/extension/"):
+                filename = path.removeprefix("/extension/")
+                allowed = {
+                    "sidepanel.css": "text/css; charset=utf-8",
+                    "sidepanel.js": "text/javascript; charset=utf-8",
+                }
+                if filename in allowed:
+                    body = (extension_dir / filename).read_bytes()
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", allowed[filename])
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
@@ -144,13 +190,19 @@ def create_handler(
                     self._send_json(stored, HTTPStatus.CREATED)
                     return
                 if path == "/api/v1/match-probability":
+                    stats_a = payload.get("stats_a", {})
+                    stats_b = payload.get("stats_b", {})
+                    if not isinstance(stats_a, dict) or not isinstance(stats_b, dict):
+                        raise ValueError("stats_a와 stats_b는 JSON 객체여야 합니다")
                     self._send_json(
                         predict_match_probability(
                             str(payload["player_a"]),
                             str(payload["player_b"]),
-                            float(payload["avg_a"]),
-                            float(payload["avg_b"]),
+                            float(payload.get("avg_a", stats_a.get("AVG"))),
+                            float(payload.get("avg_b", stats_b.get("AVG"))),
                             sets_to_win=int(payload.get("sets_to_win", 4)),
+                            stats_a=stats_a,
+                            stats_b=stats_b,
                         )
                     )
                     return
@@ -193,6 +245,7 @@ def create_handler(
                     shooter = str(payload.get("shooter", "white"))
                     if shooter not in ("white", "yellow"):
                         raise ValueError("shooter는 white 또는 yellow여야 합니다")
+                    detections.clear()
                     live_worker.start(
                         str(payload["url"]),
                         float(payload.get("timestamp_seconds", 0.0)),
@@ -239,6 +292,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--ui", type=Path, default=root / "ui" / "index.html")
     parser.add_argument(
+        "--extension",
+        type=Path,
+        default=root / "extension",
+        help="Chrome extension directory and preview assets",
+    )
+    parser.add_argument(
         "--table",
         type=Path,
         default=root / "config" / "video1_table.json",
@@ -282,6 +341,7 @@ def main() -> None:
     handler = create_handler(
         service,
         args.ui.resolve(),
+        args.extension.resolve(),
         detections,
         video_analyzer,
         live_worker,
