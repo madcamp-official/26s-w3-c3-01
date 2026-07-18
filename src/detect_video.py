@@ -3,6 +3,7 @@
 # 사용법: venv/bin/python detect_video.py 영상경로 [--every N] [--max-frames N]
 import argparse
 import csv
+import os
 import time
 from collections import Counter, deque
 
@@ -13,7 +14,7 @@ from ultralytics import YOLO
 from detect_pipeline import find_table_corners, px_to_table
 from simulate import TABLE_H, TABLE_W, estimate_probability, pick_robust_shot
 
-MODEL_PATH = "best_3cls.pt"
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_3cls.pt")
 BGR = {"white": (255, 255, 255), "yellow": (0, 180, 255), "red": (0, 0, 220)}
 
 
@@ -31,7 +32,11 @@ def detect_corners_fast(frame, scale=0.25):
 
 
 def plausible_top_view(corners, frame_shape):
-    """꼭짓점이 탑뷰다운 모양(가로 2:1, 수평 변, 충분한 크기)인지 확인."""
+    """꼭짓점이 탑뷰다운 모양(가로 2:1, 수평 변, 적정 크기, 경계 미접촉)인지 확인.
+
+    경계 접촉 검사가 중요하다: 탑뷰 당구대는 항상 화면 안쪽에 여백을 두고 잡히므로,
+    화면 가장자리에 걸친 사각형(회색 안내판, 초록 바닥 등 배경 오브젝트)은 비율이
+    우연히 2:1이어도 당구대가 아니다."""
     if corners is None:
         return False
     h_img, w_img = frame_shape[:2]
@@ -45,7 +50,10 @@ def plausible_top_view(corners, frame_shape):
     horizontal = (abs(corners[1, 1] - corners[0, 1]) < 0.05 * h_img
                   and abs(corners[2, 1] - corners[3, 1]) < 0.05 * h_img)
     area = cv2.contourArea(corners) / (w_img * h_img)
-    return 1.6 < aspect < 2.4 and horizontal and area > 0.2
+    m_x, m_y = 0.01 * w_img, 0.01 * h_img
+    inside = (corners[:, 0].min() > m_x and corners[:, 0].max() < w_img - m_x
+              and corners[:, 1].min() > m_y and corners[:, 1].max() < h_img - m_y)
+    return 1.6 < aspect < 2.4 and horizontal and 0.2 < area < 0.8 and inside
 
 
 # ---------- 큐대 방향 검출 ----------

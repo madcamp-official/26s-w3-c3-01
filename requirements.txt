@@ -48,3 +48,5 @@ typing_extensions==4.16.0
 ultralytics==8.4.98
 ultralytics-thop==2.0.20
 urllib3==2.7.0
+yt-dlp==2026.07.04
+boto3

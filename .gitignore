@@ -2,3 +2,28 @@ venv/
 __pycache__/
 .DS_Store
 out_video.mp4
+
+# 배포 비밀정보 (인스턴스 ID, SSH 키 경로 등)
+deploy/config.sh
+
+# DB 접속 정보 (비밀번호 포함) — 절대 커밋 금지
+db/db.env
+*.env
+
+# 큐/작업물 (서버 로컬 상태)
+jobs/running/
+jobs/pending/
+jobs/done/
+jobs/failed/
+videos/
+logs/
+
+# 대용량 영상 (재다운로드/원본 존재 — 커밋 금지, GitHub 100MB 제한)
+sample_videos/
+*.mov
+
+# 파생 결과물 (검출 산출물 — 재생성 가능, S3에 업로드됨)
+results/
+results_s3/
+outputs/
+billiard_turns_export.jsonl
