@@ -18,6 +18,7 @@ from cuecast_yolo.shot_probability import (
     load_shot_records,
 )
 from cuecast_yolo.live_youtube import YoutubeLiveWorker
+from cuecast_yolo.match_probability import predict_match_probability
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -141,6 +142,17 @@ def create_handler(
                         }
                     )
                     self._send_json(stored, HTTPStatus.CREATED)
+                    return
+                if path == "/api/v1/match-probability":
+                    self._send_json(
+                        predict_match_probability(
+                            str(payload["player_a"]),
+                            str(payload["player_b"]),
+                            float(payload["avg_a"]),
+                            float(payload["avg_b"]),
+                            sets_to_win=int(payload.get("sets_to_win", 4)),
+                        )
+                    )
                     return
                 if path == "/api/v1/youtube/info":
                     video = video_analyzer.resolve(str(payload["url"]))

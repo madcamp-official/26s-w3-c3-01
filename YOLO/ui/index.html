@@ -10,6 +10,11 @@
     body { margin:0; background:var(--bg); color:var(--text); font-family:Inter,system-ui,sans-serif; }
     button,input { font:inherit; }
     .app { max-width:1440px; margin:auto; padding:18px; display:grid; gap:14px; }
+    .tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); }
+    .tabs button { border:0; border-radius:8px 8px 0 0; background:transparent; color:var(--muted); }
+    .tabs button[aria-selected="true"] { color:var(--text); background:var(--panel); box-shadow:inset 0 -2px var(--blue); }
+    .view { display:grid; gap:14px; }
+    [hidden] { display:none!important; }
     .toolbar,.status,.panel,.stat { background:var(--panel); border:1px solid var(--line); border-radius:12px; }
     .toolbar { padding:12px; display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
     label { display:grid; gap:6px; flex:1 1 460px; color:var(--muted); font-size:13px; }
@@ -47,11 +52,35 @@
     .progress span { display:block; height:100%; background:var(--blue); transition:width .2s; }
     .detail { color:var(--muted); font-size:12px; word-break:break-word; }
     .box { fill:none; stroke-width:3; }.box.white { stroke:var(--blue); }.box.yellow { stroke:var(--yellow); }.box.red { stroke:var(--red); }
-    @media(max-width:800px){.main,.stats{grid-template-columns:1fr}.app{padding:10px}}
+    .match-layout { display:grid; grid-template-columns:minmax(280px,.7fr) minmax(440px,1.3fr); gap:14px; }
+    .match-form { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .match-form label { flex:auto; }
+    .match-form .wide { grid-column:1/-1; }
+    select { width:100%; padding:10px 12px; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:8px; }
+    .match-result { align-content:start; gap:18px; }
+    .versus { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:18px; text-align:center; }
+    .player-face { display:grid; justify-items:center; gap:8px; min-width:0; }
+    .avatar { width:76px; height:76px; display:grid; place-items:center; border-radius:50%; background:#26313a; border:2px solid var(--line); font-size:28px; font-weight:500; }
+    .player-face.favorite .avatar { border-color:var(--blue); box-shadow:0 0 0 4px color-mix(in srgb,var(--blue) 18%,transparent); }
+    .player-face strong { font-size:20px; overflow-wrap:anywhere; }
+    .win-value { font-size:34px; font-weight:500; }
+    .vs { color:var(--muted); font-weight:500; }
+    .odds-bar { display:flex; height:28px; overflow:hidden; border-radius:999px; background:#27313a; }
+    .odds-bar span { display:grid; place-items:center; min-width:54px; color:#071018; font-size:12px; font-weight:500; transition:width .25s; }
+    .odds-a { background:var(--blue); }.odds-b { background:var(--yellow); }
+    .match-summary { text-align:center; display:grid; gap:5px; }
+    .match-summary strong { font-size:22px; }
+    .model-note { color:var(--muted); font-size:12px; text-align:center; }
+    @media(max-width:800px){.main,.stats,.match-layout{grid-template-columns:1fr}.app{padding:10px}.match-form{grid-template-columns:1fr}.match-form .wide{grid-column:auto}.avatar{width:60px;height:60px}.versus{gap:8px}}
   </style>
 </head>
 <body>
 <main class="app">
+  <nav class="tabs" role="tablist" aria-label="CueCast 화면">
+    <button id="live-tab" role="tab" aria-selected="true" aria-controls="live-view">실시간 샷 분석</button>
+    <button id="match-tab" role="tab" aria-selected="false" aria-controls="match-view">경기 전 승부 예측</button>
+  </nav>
+  <div class="view" id="live-view" role="tabpanel" aria-labelledby="live-tab">
   <section class="toolbar">
     <label>YouTube URL<input id="youtube-url" type="url" placeholder="https://www.youtube.com/watch?v=..."></label>
     <button class="primary" id="connect">영상 연결</button>
@@ -84,6 +113,33 @@
   </section>
   <div class="progress"><span id="bar" style="width:0"></span></div>
   <div class="detail" id="detail">검출 좌표 대기</div>
+  </div>
+  <div class="view" id="match-view" role="tabpanel" aria-labelledby="match-tab" hidden>
+    <section class="match-layout">
+      <article class="panel">
+        <div class="heading"><h2>경기 정보</h2><span class="badge">경기 시작 전</span></div>
+        <div class="match-form">
+          <label>선수 A<input id="player-a" value="김가영" autocomplete="off"></label>
+          <label>선수 B<input id="player-b" value="스롱 피아비" autocomplete="off"></label>
+          <label>선수 A AVG<input id="avg-a" type="number" min="0.1" max="5" step="0.01" value="1.65"></label>
+          <label>선수 B AVG<input id="avg-b" type="number" min="0.1" max="5" step="0.01" value="1.45"></label>
+          <label class="wide">먼저 이길 세트<select id="sets-to-win"><option value="3">3세트</option><option value="4" selected>4세트</option><option value="5">5세트</option></select></label>
+          <button class="primary wide" id="match-predict">승리 확률 계산</button>
+        </div>
+      </article>
+      <article class="panel match-result" aria-live="polite">
+        <div class="heading"><h2>승부 예측</h2><span class="badge" id="match-model">초기 추정</span></div>
+        <div class="versus">
+          <div class="player-face" id="face-a"><span class="avatar" id="avatar-a">김</span><strong id="name-a">김가영</strong><span class="win-value" id="win-a">--</span><small id="set-a">세트 승률 --</small></div>
+          <span class="vs">VS</span>
+          <div class="player-face" id="face-b"><span class="avatar" id="avatar-b">스</span><strong id="name-b">스롱 피아비</strong><span class="win-value" id="win-b">--</span><small id="set-b">세트 승률 --</small></div>
+        </div>
+        <div class="odds-bar" role="img" aria-label="두 선수 승리 확률 비교"><span class="odds-a" id="odds-a" style="width:50%">50%</span><span class="odds-b" id="odds-b" style="width:50%">50%</span></div>
+        <div class="match-summary"><strong id="favorite">계산 대기</strong><span id="likely-score">예상 스코어 --</span></div>
+        <div class="model-note">현재는 선수 AVG와 경기 세트 수만 반영한 초기 추정치입니다. 경기 DB가 쌓이면 상대 전적·최근 폼·테이블 조건을 추가할 수 있습니다.</div>
+      </article>
+    </section>
+  </div>
 </main>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
@@ -94,6 +150,8 @@
   ];
   let balls=samples[0],sampleIndex=0,shooter='white',detectionVersion=0,formationRevision=0,ytPlayer=null,ytApiReady=false,isScrubbing=false,liveRunning=false,liveSyncTimer=null;
   const $=id=>document.getElementById(id);
+  function showTab(name){const live=name==='live';$('live-view').hidden=!live;$('match-view').hidden=live;$('live-tab').setAttribute('aria-selected',String(live));$('match-tab').setAttribute('aria-selected',String(!live));if(!live)predictMatch()}
+  $('live-tab').onclick=()=>showTab('live');$('match-tab').onclick=()=>showTab('match');
   window.onYouTubeIframeAPIReady=()=>{ytApiReady=true};
   function videoId(value){try{const u=new URL(value.trim());if(u.hostname.includes('youtu.be'))return u.pathname.split('/').filter(Boolean)[0];if(u.searchParams.get('v'))return u.searchParams.get('v');const p=u.pathname.split('/').filter(Boolean),i=p.findIndex(x=>['embed','shorts','live'].includes(x));return i>=0?p[i+1]:null}catch{return /^[\w-]{11}$/.test(value.trim())?value.trim():null}}
   function formatTime(seconds){seconds=Math.max(0,Math.round(Number(seconds)||0));const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=seconds%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
@@ -121,6 +179,11 @@
       applyPrediction(data);
     }catch(error){$('status').textContent='엔진 연결 실패';$('status-detail').textContent=error.message;$('dot').classList.remove('connected')}
   }
+  async function predictMatch(){
+    const playerA=$('player-a').value.trim(),playerB=$('player-b').value.trim(),avgA=Number($('avg-a').value),avgB=Number($('avg-b').value),setsToWin=Number($('sets-to-win').value);$('favorite').textContent='계산 중';
+    try{const response=await fetch('/api/v1/match-probability',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({player_a:playerA,player_b:playerB,avg_a:avgA,avg_b:avgB,sets_to_win:setsToWin})});const data=await response.json();if(!response.ok)throw new Error(data.detail||data.error);const pa=data.playerA.winProbability*100,pb=data.playerB.winProbability*100,sa=data.playerA.setProbability*100,sb=data.playerB.setProbability*100;$('name-a').textContent=data.playerA.name;$('name-b').textContent=data.playerB.name;$('avatar-a').textContent=data.playerA.name[0];$('avatar-b').textContent=data.playerB.name[0];$('win-a').textContent=`${pa.toFixed(1)}%`;$('win-b').textContent=`${pb.toFixed(1)}%`;$('set-a').textContent=`세트 승률 ${sa.toFixed(1)}%`;$('set-b').textContent=`세트 승률 ${sb.toFixed(1)}%`;$('odds-a').style.width=`${pa}%`;$('odds-b').style.width=`${pb}%`;$('odds-a').textContent=`${pa.toFixed(0)}%`;$('odds-b').textContent=`${pb.toFixed(0)}%`;$('face-a').classList.toggle('favorite',pa>pb);$('face-b').classList.toggle('favorite',pb>pa);const winner=data.likelyScore.winner==='a'?data.playerA.name:data.playerB.name;$('favorite').textContent=Math.abs(pa-pb)<1?'팽팽한 승부':`${winner} 우세`;$('likely-score').textContent=`가장 가능성 높은 스코어 · ${winner} ${data.likelyScore.winnerSets}-${data.likelyScore.loserSets}`;$('match-model').textContent=data.modelVersion}catch(error){$('favorite').textContent=error.message;$('likely-score').textContent='입력값을 확인하세요'}
+  }
+  $('match-predict').onclick=predictMatch;
   function selectCue(value){shooter=value;formationRevision++;renderBalls();predict();if(liveRunning)fetch('/api/v1/youtube/live/shooter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shooter})})}
   $('connect').onclick=()=>{const id=videoId($('youtube-url').value);if(!id){$('status').textContent='YouTube URL 확인 필요';return}if(!ytApiReady||!window.YT){$('status').textContent='YouTube 플레이어 준비 중';$('status-detail').textContent='잠시 후 다시 눌러주세요';return}$('placeholder').classList.add('hidden');if(ytPlayer&&typeof ytPlayer.loadVideoById==='function'){ytPlayer.loadVideoById(id);syncLiveTo(0);return}ytPlayer=new YT.Player('player',{videoId:id,playerVars:{autoplay:1,mute:1,playsinline:1},events:{onReady:event=>{event.target.mute();$('position-range').disabled=false;$('seek').disabled=false;$('analyze').disabled=false;syncPlayerTime();syncLiveTo(event.target.getCurrentTime()||0)},onStateChange:syncPlayerTime}})};
   $('position-range').onpointerdown=()=>{isScrubbing=true};
