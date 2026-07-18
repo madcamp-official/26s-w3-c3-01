@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "name": "CueCast Live",
+  "description": "YouTube 당구 영상의 공 배치와 샷 성공률을 실시간으로 표시합니다.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "CueCast 열기"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

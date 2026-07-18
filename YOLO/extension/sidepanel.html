@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CueCast Live</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<main class="app">
+  <nav class="tabs" role="tablist" aria-label="CueCast 화면">
+    <button id="live-tab" role="tab" aria-selected="true">실시간 샷 분석</button>
+    <button id="match-tab" role="tab" aria-selected="false">경기 전 승부 예측</button>
+  </nav>
+
+  <section class="view" id="live-view" role="tabpanel">
+    <header class="topline"><div><span class="eyebrow">현재 YouTube</span><strong id="video-title">영상 확인 중</strong></div><span class="badge" id="live-state">서버 연결 중</span></header>
+    <div class="actions"><button class="primary" id="live-toggle">자동 분석 시작</button><button id="sync">현재 위치 동기화</button></div>
+
+    <section class="panel">
+      <div class="heading"><h2>버추얼 포메이션</h2><div class="cue">수구 <button class="active" id="white">흰 공</button><button id="yellow">노란 공</button></div></div>
+      <div class="table"><i class="ball white cueball"></i><i class="ball yellow"></i><i class="ball red"></i></div>
+      <div class="coordinates" id="coordinates">검출 좌표 대기</div>
+    </section>
+
+    <section class="metrics">
+      <article><span>샷 성공률</span><strong id="probability">--</strong></article>
+      <article><span>난이도</span><strong id="difficulty">--</strong></article>
+      <article><span>신뢰도</span><strong id="confidence">--</strong></article>
+    </section>
+    <div class="progress"><span id="probability-bar"></span></div>
+    <p class="detail" id="live-detail">CueCast 로컬 서버를 확인하고 있습니다.</p>
+  </section>
+
+  <section class="view" id="match-view" role="tabpanel" hidden>
+    <section class="panel form-grid">
+      <div class="heading wide"><h2>경기 정보</h2><span class="badge">경기 시작 전</span></div>
+      <label>선수 A<input id="player-a" value="김가영"></label>
+      <label>선수 B<input id="player-b" value="스롱 피아비"></label>
+      <label>선수 A AVG<input id="avg-a" type="number" min="0.1" max="5" step="0.01" value="1.65"></label>
+      <label>선수 B AVG<input id="avg-b" type="number" min="0.1" max="5" step="0.01" value="1.45"></label>
+      <label class="wide">먼저 이길 세트<select id="sets"><option value="3">3세트</option><option value="4" selected>4세트</option><option value="5">5세트</option></select></label>
+      <button class="primary wide" id="match-predict">승리 확률 계산</button>
+    </section>
+    <section class="panel result">
+      <div class="heading"><h2>승부 예측</h2><span class="badge" id="model">초기 추정</span></div>
+      <div class="versus"><div class="player" id="face-a"><span class="avatar" id="avatar-a">김</span><strong id="name-a">김가영</strong><b id="win-a">--</b><small id="set-a">세트 승률 --</small></div><span>VS</span><div class="player" id="face-b"><span class="avatar" id="avatar-b">스</span><strong id="name-b">스롱 피아비</strong><b id="win-b">--</b><small id="set-b">세트 승률 --</small></div></div>
+      <div class="odds"><span id="odds-a">50%</span><span id="odds-b">50%</span></div>
+      <div class="summary"><strong id="favorite">계산 대기</strong><span id="score">예상 스코어 --</span></div>
+      <p class="detail">현재는 선수 AVG와 경기 세트 수를 반영한 초기 추정치입니다.</p>
+    </section>
+  </section>
+</main>
+<script src="sidepanel.js"></script>
+</body>
+</html>
