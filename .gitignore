@@ -27,3 +27,7 @@ results/
 results_s3/
 outputs/
 billiard_turns_export.jsonl
+baseline_before_rebuild.jsonl
+
+# JetBrains IDE
+.idea/
