@@ -32,6 +32,17 @@ DIFF_TH = 3.5           # 점수 영역 평균 픽셀 변화가 이보다 크면
 HEARTBEAT_SAMPLES = 20  # 변화가 없어도 이 샘플 수마다 한 번은 OCR (판독 시각 갱신용)
 SCORE_MAX = 40          # 이 값 초과 판독은 오독으로 버림
 
+# --- 현재 이닝(런) 원형 표시 ---
+# 점수 박스 오른쪽의 흰/노란 원. 숫자가 떠 있는 쪽이 지금 치는 선수(= 수구 색)이고,
+# 값은 이번 이닝 득점 누계(득점마다 +1, 뱅크샷 +2). 상대 원은 숫자 없이 비어 있다.
+# 원에 0이 새로 나타나는 순간이 턴 교대(다음 선수 시작) 시점이다.
+CIRCLE_SEARCH_X = 3.0        # 박스 오른쪽으로 박스 폭의 몇 배까지 원을 찾나
+CIRCLE_EXTENT_MIN = 0.6      # 원형 충전율 범위 (원 ≈ 0.785, 사각형 ≈ 1.0 배제)
+CIRCLE_EXTENT_MAX = 0.92
+CIRCLE_DIGIT_DARK_MIN = 0.03 # 원 중앙부 어두운 픽셀 비율이 이보다 크면 숫자가 있음
+CIRCLE_TRY_MAX = 600         # 이 샘플 수 안에 원을 못 찾으면 포기(레이아웃 다른 방송)
+RUN_MAX = 30                 # 이닝 점수 상한 (초과 판독은 오독)
+
 
 class ScoreReader:
     """sample(frame_idx, frame)을 주기적으로 호출하면 events 에
@@ -55,6 +66,15 @@ class ScoreReader:
         self._pending = None        # (frame, (w, y)) 확정 대기 중 판독
         self._sig = None            # 변화 감지용 축소 그레이 서명
         self._since_ocr = 0
+        # 현재 이닝 원형 표시 (수구/턴 교대 판별)
+        self.circle_white = None    # (x, y, w, h)
+        self.circle_yellow = None
+        self.circles_locked = False
+        self.active_events = []     # [(frame, "white"|"yellow", 이닝점수)] 변화 시점
+        self._circle_cands = []
+        self._circle_tries = 0
+        self._active_committed = None
+        self._active_pending = None
 
     @staticmethod
     def _tess_ok():
@@ -115,6 +135,146 @@ class ScoreReader:
         self._sig_box = (min(xs), min(ys), x2 - min(xs), y2 - min(ys))
         self.locked = True
 
+    # ---------- 현재 이닝 원형 표시 (수구 판별) ----------
+    def _find_circle_near(self, frame, box, kind):
+        """점수 박스 오른쪽에서 같은 색 원형 표시를 찾는다. 실패 시 None."""
+        x, y, w, h = box
+        x1, x2 = x + w, min(frame.shape[1], x + w + int(CIRCLE_SEARCH_X * w))
+        y1, y2 = max(0, y - h // 3), min(frame.shape[0], y + h + h // 3)
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        if kind == "white":
+            mask = (((hsv[..., 1] < WHITE_S_MAX) & (hsv[..., 2] > WHITE_V_MIN))
+                    .astype(np.uint8) * 255)
+        else:
+            mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        for c in cnts:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if not (0.5 * h < bh < 1.4 * h):        # 박스 높이와 비슷한 크기만
+                continue
+            if not (0.7 < bw / bh < 1.4):           # 대략 원형 비율
+                continue
+            ext = cv2.contourArea(c) / (bw * bh)
+            if not (CIRCLE_EXTENT_MIN < ext < CIRCLE_EXTENT_MAX):
+                continue                            # 사각형(박스)·가는 아이콘 배제
+            if best is None or bx < best[0]:        # 박스에서 가장 가까운 후보
+                best = (bx, by, bw, bh)
+        if best is None:
+            return None
+        bx, by, bw, bh = best
+        return (x1 + bx, y1 + by, bw, bh)
+
+    def _try_locate_circles(self, frame):
+        cw = self._find_circle_near(frame, self.box_white, "white")
+        cy = self._find_circle_near(frame, self.box_yellow, "yellow")
+        if cw is None or cy is None:
+            self._circle_cands.clear()
+            return
+        self._circle_cands.append((cw, cy))
+        if len(self._circle_cands) < LOCK_N:
+            return
+        arr = np.array(self._circle_cands)
+        med = np.median(arr, axis=0).astype(int)
+        if np.abs(arr - med).max() > max(med[0, 2], med[0, 3]):
+            self._circle_cands = self._circle_cands[-1:]
+            return
+        self.circle_white, self.circle_yellow = tuple(med[0]), tuple(med[1])
+        self.circles_locked = True
+        # 변화 감지 서명 영역을 원까지 포함하도록 확장
+        boxes = (self.box_white, self.box_yellow, self.circle_white, self.circle_yellow)
+        x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+        x2 = max(b[0] + b[2] for b in boxes); y2 = max(b[1] + b[3] for b in boxes)
+        self._sig_box = (x0, y0, x2 - x0, y2 - y0)
+        self._sig = None                            # 서명 영역 바뀜 — 리셋
+
+    def _read_circle(self, frame, box, kind):
+        """원형 하나 판독 → (이닝점수 or None, 숫자유무, 가시성).
+        빈 원 = (None, False, True) — 비활성 선수.
+        숫자가 있는데 판독 실패 = (None, True, True)."""
+        x, y, w, h = box
+        crop = frame[y:y + h, x:x + w]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        if kind == "white":
+            frac = np.mean((hsv[..., 1] < WHITE_S_MAX) & (hsv[..., 2] > WHITE_V_MIN))
+        else:
+            frac = np.mean(cv2.inRange(hsv, YELLOW_LO, YELLOW_HI) > 0)
+        if frac < 0.35:
+            return None, False, False               # 점수판이 화면에 없음
+        m = max(2, int(0.18 * min(w, h)))           # 테두리 안티앨리어싱 배제
+        inner = cv2.cvtColor(crop[m:h - m, m:w - m], cv2.COLOR_BGR2GRAY)
+        if inner.size == 0 or float(np.mean(inner < 100)) < CIRCLE_DIGIT_DARK_MIN:
+            return None, False, True                # 빈 원 — 비활성
+        up = cv2.resize(inner, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, th = cv2.threshold(up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        th = cv2.copyMakeBorder(th, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+        for psm in (10, 8, 7):                      # 한 글자 → 단어 → 한 줄
+            txt = pytesseract.image_to_string(
+                th, config=f"--psm {psm} -c tessedit_char_whitelist=0123456789")
+            digits = "".join(ch for ch in txt if ch.isdigit())
+            if digits:
+                v = int(digits)
+                return (v, True, True) if v <= RUN_MAX else (None, True, True)
+        return None, True, True
+
+    def _sample_circles(self, frame_idx, frame):
+        """활성 선수(숫자 뜬 원)와 이닝 점수를 판독해 active_events 에 기록.
+        점수와 같은 2회 연속 확정 방식."""
+        rw, dw, vw = self._read_circle(frame, self.circle_white, "white")
+        ry, dy, vy = self._read_circle(frame, self.circle_yellow, "yellow")
+        if not (vw and vy):
+            self._active_pending = None
+            return
+        if dw and not dy:
+            color, run = "white", rw
+        elif dy and not dw:
+            color, run = "yellow", ry
+        else:
+            return                                  # 둘 다/둘 다 아님 → 모호, 보류
+        if run is None:
+            return                                  # 숫자 판독 실패 — 다음 샘플에서
+        reading = (color, run)
+        if reading == self._active_committed:
+            self._active_pending = None
+        elif self._active_pending and self._active_pending[1] == reading:
+            self.active_events.append((self._active_pending[0], color, run))
+            self._active_committed = reading
+            self._active_pending = None
+        else:
+            self._active_pending = (frame_idx, reading)
+
+    # ---------- 수구/이닝 조회 ----------
+    def active_color_at(self, f0, f1):
+        """샷 창 [f0, f1)의 수구 색 — f0 이전 마지막 활성 이벤트의 색.
+        없으면 창 안 첫 이벤트의 색, 그래도 없으면 None."""
+        last = None
+        for f, color, _ in self.active_events:
+            if f <= f0:
+                last = color
+            elif f < f1:
+                if last is None:
+                    last = color
+                break
+            else:
+                break
+        return last
+
+    def run_steps_in(self, f0, f1, color):
+        """창 안에서 해당 색 이닝 점수가 오른 스텝 [(frame, 증가량)] —
+        같은 색 연속 이벤트끼리만 비교(턴 교대로 0 리셋은 스텝이 아님)."""
+        steps, prev = [], None
+        for f, c, run in self.active_events:
+            if c != color:
+                prev = None
+                continue
+            if prev is not None and f0 <= f < f1 and run > prev:
+                steps.append((f, run - prev))
+            prev = run
+        return steps
+
     # ---------- 숫자 판독 ----------
     def _read_box(self, frame, box, kind):
         """박스 하나에서 (점수, 가시성)을 읽는다.
@@ -172,6 +332,10 @@ class ScoreReader:
             self._try_locate(frame)
             if not self.locked:
                 return
+        # 박스 잠금 후: 오른쪽의 이닝 원형 표시도 잠금 시도 (없는 레이아웃이면 포기)
+        if not self.circles_locked and self._circle_tries < CIRCLE_TRY_MAX:
+            self._circle_tries += 1
+            self._try_locate_circles(frame)
         # OCR은 느리므로 점수 영역 픽셀이 변한 순간에만 실행 (+주기적 하트비트,
         # 확정 대기 중이면 다음 샘플에서 바로 재판독)
         x, y, w, h = self._sig_box
@@ -180,10 +344,13 @@ class ScoreReader:
         self._since_ocr += 1
         changed = (self._sig is None
                    or float(np.mean(cv2.absdiff(sig, self._sig))) > DIFF_TH)
-        if not (changed or self._pending or self._since_ocr >= HEARTBEAT_SAMPLES):
+        if not (changed or self._pending or self._active_pending
+                or self._since_ocr >= HEARTBEAT_SAMPLES):
             return
         self._sig = sig
         self._since_ocr = 0
+        if self.circles_locked:
+            self._sample_circles(frame_idx, frame)
         sw, vis_w = self._read_box(frame, self.box_white, "white")
         sy, vis_y = self._read_box(frame, self.box_yellow, "yellow")
         visible = vis_w and vis_y

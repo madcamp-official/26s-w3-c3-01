@@ -2,6 +2,8 @@
 # 성공 판정: 방송 점수판 OCR 전용 — 샷 구간에 수구 색 점수가 +1(+2=뱅크샷) 오르면 성공.
 #   점수판은 오퍼레이터가 올리는 사실상의 정답이다.
 #   (PBA 점수판: 흰 박스=흰 수구 선수, 노란 박스=노란 수구 선수 → 수구와 바로 매칭)
+# 수구 산정: 점수 박스 오른쪽 원형(현재 이닝 득점 표시)에 숫자가 뜬 색 = 지금 치는 선수.
+#   턴 교대 시 상대 원형에 0이 새로 나타난다. 원형 판독 불가 구간만 움직임 기반 폴백.
 # 점수판으로 판정할 수 없는 턴(판독 끊김·점수 튐·기준값 없음)은 폐기한다.
 #   궤적(쿠션 세기) 판정은 신뢰도가 낮아 라벨로 쓰지 않는다 — 점수판이 아예 없는
 #   영상(스포방지 마스킹·화면기록 등)은 전 턴 폐기되어 0턴이 된다.
@@ -323,12 +325,15 @@ def drop_unjudged_turns(turns):
 
 
 def apply_scoreboard_judgment(turns, reader, fps):
-    """점수판 이벤트로 턴별 성공 여부를 재판정한다.
+    """점수판 이벤트로 턴별 수구·성공 여부를 판정한다.
     턴 i의 창 = [frame_start_i, frame_start_{i+1}) — 득점 반영은 다음 샷 전에 이뤄진다.
-    창 안에서 수구 색 점수가 +1/+2 오른 스텝이 있으면 성공.
-    +2는 뱅크샷(3쿠션 선행 후 두 목적구 접촉 = 2점) → bank_shot=True 로 기록.
-    스텝이 없으면 실패 — 단, 창 끝까지 판독이 이어졌을 때만 확정한다.
-    점수가 이상하게 튄 창(편집 컷 등)은 건너뛰고 궤적 판정을 유지한다.
+
+    수구: 점수판 원형(현재 이닝 표시)에 숫자가 떠 있는 색이 지금 치는 선수 = 수구.
+      원형에 0이 새로 나타나면 턴 교대. 움직임 기반 추정(first mover)은 폴백으로만.
+    성공: 창 안에서 수구 색의 ① 총점 박스 +1/+2 스텝 또는 ② 이닝 원형 +1/+2 스텝.
+      +2 = 뱅크샷 → bank_shot=True. 스텝이 없으면 실패 —
+      단, 창 끝까지 판독이 이어졌을 때만 확정한다.
+    점수가 이상하게 튄 창(편집 컷 등)은 건너뛴다(→ 이후 폐기됨).
     적용한 턴 수를 반환."""
     col = {"white": 1, "yellow": 2}
     ev = reader.events
@@ -336,11 +341,23 @@ def apply_scoreboard_judgment(turns, reader, fps):
              for i in range(1, len(ev))]
     n_applied = 0
     for i, t in enumerate(turns):
+        start = t["frame_start"]
+        end = turns[i + 1]["frame_start"] if i + 1 < len(turns) else None
+        end_x = end if end is not None else t["frame_end"] + 1
+        det = t["success_detail"]
+        # --- 수구 산정: 이닝 원형이 1순위 ---
+        sb_cue = (reader.active_color_at(start, end_x)
+                  if reader.active_events else None)
+        if sb_cue:
+            if sb_cue != t["shooter"]:
+                det["mover"] = t["shooter"]     # 참고: 가장 먼저 움직인 공(기존 추정)
+            t["shooter"] = sb_cue
+            det["shooter_source"] = "scoreboard"
+        else:
+            det["shooter_source"] = "motion"
         cue = t["shooter"]
         if cue not in col:
             continue
-        start = t["frame_start"]
-        end = turns[i + 1]["frame_start"] if i + 1 < len(turns) else None
         if reader.first_read_frame is None or reader.first_read_frame > start:
             continue                    # 창 시작 전에 기준 점수가 없음
         win = [s for s in steps
@@ -349,8 +366,13 @@ def apply_scoreboard_judgment(turns, reader, fps):
         clean = [s for s in win if s[me] in (1, 2) and s[opp] == 0]
         reset = [s for s in win if s[1] <= 0 and s[2] <= 0]   # 세트 종료 리셋
         if any(s not in clean and s not in reset for s in win):
-            continue                    # 점수가 튐(하이라이트 컷 등) → 궤적 판정 유지
-        if clean:
+            continue                    # 점수가 튐(하이라이트 컷 등) → 판정 보류
+        # --- 이닝 원형 스텝: 총점 박스와 독립인 두 번째 득점 근거 ---
+        run_steps = (reader.run_steps_in(start, end if end is not None
+                                         else float("inf"), cue)
+                     if reader.active_events else [])
+        clean_run = [s for s in run_steps if s[1] in (1, 2)]
+        if clean or clean_run:
             ok = True
         else:
             # '실패' 확정은 창 끝(마지막 턴은 샷 종료 + 여유)까지 판독됐어야 신뢰 가능
@@ -358,12 +380,15 @@ def apply_scoreboard_judgment(turns, reader, fps):
             if reader.last_read_frame is None or reader.last_read_frame < need:
                 continue
             ok = False
-        det = t["success_detail"]
         det["traj_success"] = t["success"]      # 궤적 판정 결과 보존 (QA 비교용)
         det["method"] = "scoreboard"
         det["score_steps"] = [[int(f), int(dw), int(dy)] for f, dw, dy in win]
+        if run_steps:
+            det["run_steps"] = [[int(f), int(d)] for f, d in run_steps]
         # 창에 스텝이 여럿이면 첫 스텝이 이 턴의 득점 (뒤 스텝은 놓친 턴의 것)
-        det["bank_shot"] = bool(ok and clean[0][me] == 2)
+        det["bank_shot"] = bool(ok and ((clean and clean[0][me] == 2)
+                                        or (not clean and clean_run
+                                            and clean_run[0][1] == 2)))
         t["success"] = ok
         n_applied += 1
     return n_applied
