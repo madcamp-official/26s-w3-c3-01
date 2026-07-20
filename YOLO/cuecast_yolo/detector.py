@@ -8,6 +8,14 @@ import numpy as np
 
 
 BALL_NAMES = ("white_ball", "yellow_ball", "red_ball")
+BALL_NAME_ALIASES = {
+    "white": "white_ball",
+    "yellow": "yellow_ball",
+    "red": "red_ball",
+    "white_ball": "white_ball",
+    "yellow_ball": "yellow_ball",
+    "red_ball": "red_ball",
+}
 
 
 @dataclass(frozen=True)
@@ -64,8 +72,8 @@ class YOLOBallDetector:
 
         for box in result.boxes:
             class_id = int(box.cls[0].item())
-            name = str(names[class_id])
-            if name not in BALL_NAMES:
+            name = BALL_NAME_ALIASES.get(str(names[class_id]).lower())
+            if name is None:
                 continue
 
             confidence = float(box.conf[0].item())

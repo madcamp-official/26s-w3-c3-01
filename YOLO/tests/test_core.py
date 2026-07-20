@@ -182,6 +182,23 @@ class PreCutLayoutBufferTest(unittest.TestCase):
         assert event is not None
         self.assertAlmostEqual(event.positions["white_ball"][0], 0.210)
 
+    def test_finalizes_one_recent_sample_when_configured(self) -> None:
+        buffer = PreCutLayoutBuffer(sample_count=1, max_cut_gap=0.2)
+        positions = self.positions(0.01)
+        buffer.add(1.0, positions)
+
+        event = buffer.finalize_on_cut(1.1)
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.positions, positions)
+
+    def test_rejects_one_stale_sample(self) -> None:
+        buffer = PreCutLayoutBuffer(sample_count=1, max_cut_gap=0.2)
+        buffer.add(1.0, self.positions(0.01))
+
+        self.assertIsNone(buffer.finalize_on_cut(1.21))
+
     def test_rejects_fast_movement_before_cut(self) -> None:
         buffer = PreCutLayoutBuffer(max_step=0.02, max_span=0.04)
         buffer.add(0.0, self.positions(0.00))

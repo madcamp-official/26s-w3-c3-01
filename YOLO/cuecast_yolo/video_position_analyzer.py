@@ -12,6 +12,7 @@ import numpy as np
 
 from .color_detector import ColorBallDetector
 from .detector import BALL_NAMES
+from .minsu_detector import MinsuRealtimeDetector, TrackingFrame
 from .precut import BufferedLayout, PreCutLayoutBuffer
 from .view_gate import is_fixed_top_view
 
@@ -32,9 +33,15 @@ class VideoPositionAnalyzer:
         *,
         sample_fps: float = 5.0,
         table_config: Path | None = None,
+        model_path: Path | None = None,
     ) -> None:
         self.sample_fps = sample_fps
         self.detector = ColorBallDetector()
+        default_model = Path(__file__).resolve().parents[1] / "weights" / "best_3cls.pt"
+        selected_model = model_path or default_model
+        self.minsu_detector = (
+            MinsuRealtimeDetector(selected_model) if selected_model.exists() else None
+        )
         self._detector_lock = Lock()
         self.reference_corners: np.ndarray | None = None
         self.reference_size = (640.0, 360.0)
@@ -47,6 +54,71 @@ class VideoPositionAnalyzer:
             )
         self._cache: dict[str, tuple[float, VideoSource]] = {}
         self._cache_lock = Lock()
+
+    def reset_tracking(self) -> None:
+        if self.minsu_detector is not None:
+            self.minsu_detector.reset()
+
+    def detect_tracking_frame(self, frame: np.ndarray) -> TrackingFrame:
+        """Return partial real-time detections; Minsu YOLO is preferred."""
+        with self._detector_lock:
+            if self.minsu_detector is not None:
+                return self.minsu_detector.detect(frame)
+
+            height, width = frame.shape[:2]
+            corners = None
+            if self.reference_corners is not None:
+                corners = self.reference_corners.copy()
+                corners[:, 0] *= width / self.reference_size[0]
+                corners[:, 1] *= height / self.reference_size[1]
+            if corners is not None:
+                if not is_fixed_top_view(
+                    frame, corners, min_mean_edge_support=0.50, min_side_edge_support=0.34
+                ):
+                    return TrackingFrame({}, {}, False)
+                table = self.detector.table_view_from_corners(frame, corners)
+                detections = self.detector.detect_in_table(table.warped)
+            else:
+                table, detections = self.detector.detect(frame)
+                if table is None:
+                    return TrackingFrame({}, {}, False)
+            return TrackingFrame(
+                self.detector.normalized_positions(detections),
+                {name: detection.confidence for name, detection in detections.items()},
+                True,
+            )
+
+    def detect_stopped_layout_frame(self, frame: np.ndarray) -> TrackingFrame:
+        """Run the color/contour/Hough pipeline used by the stopped-layout video."""
+
+        with self._detector_lock:
+            height, width = frame.shape[:2]
+            corners = None
+            if self.reference_corners is not None:
+                corners = self.reference_corners.copy()
+                corners[:, 0] *= width / self.reference_size[0]
+                corners[:, 1] *= height / self.reference_size[1]
+
+            if corners is not None:
+                if not is_fixed_top_view(
+                    frame,
+                    corners,
+                    min_mean_edge_support=0.58,
+                    min_side_edge_support=0.42,
+                ):
+                    return TrackingFrame({}, {}, False)
+                table = self.detector.table_view_from_corners(frame, corners)
+                detections = self.detector.detect_in_table(table.warped)
+            else:
+                table, detections = self.detector.detect(frame)
+                if table is None:
+                    return TrackingFrame({}, {}, False)
+
+            return TrackingFrame(
+                self.detector.normalized_positions(detections),
+                {name: detection.confidence for name, detection in detections.items()},
+                True,
+            )
 
     def resolve(self, source: str) -> VideoSource:
         local_path = Path(source)
@@ -105,36 +177,11 @@ class VideoPositionAnalyzer:
         self, frame: np.ndarray
     ) -> tuple[dict[str, tuple[float, float]], float] | None:
         """Detect a complete three-ball layout in a calibrated overhead frame."""
-        height, width = frame.shape[:2]
-        corners = None
-        if self.reference_corners is not None:
-            corners = self.reference_corners.copy()
-            corners[:, 0] *= width / self.reference_size[0]
-            corners[:, 1] *= height / self.reference_size[1]
-
-        with self._detector_lock:
-            if corners is not None:
-                top_view = is_fixed_top_view(
-                    frame,
-                    corners,
-                    min_mean_edge_support=0.50,
-                    min_side_edge_support=0.34,
-                )
-                if not top_view:
-                    return None
-                table = self.detector.table_view_from_corners(frame, corners)
-                detections = self.detector.detect_in_table(table.warped)
-            else:
-                table, detections = self.detector.detect(frame)
-                if table is None:
-                    return None
-            if not all(name in detections for name in BALL_NAMES):
-                return None
-            positions = self.detector.normalized_positions(detections)
-            confidence = sum(
-                float(detections[name].confidence) for name in BALL_NAMES
-            ) / len(BALL_NAMES)
-        return positions, confidence
+        tracked = self.detect_tracking_frame(frame)
+        if not tracked.valid_view or not all(name in tracked.positions for name in BALL_NAMES):
+            return None
+        confidence = sum(tracked.confidences[name] for name in BALL_NAMES) / len(BALL_NAMES)
+        return tracked.positions, confidence
 
     def analyze(
         self,

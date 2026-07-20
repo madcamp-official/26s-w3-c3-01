@@ -5,5 +5,6 @@ runs/
 outputs/
 datasets/
 *.pt
+!weights/best_3cls.pt
 *.onnx
 *.mp4

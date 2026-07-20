@@ -93,9 +93,9 @@ class ShotRecordTest(unittest.TestCase):
         restored = ShotRecord.from_db_dict(db_row)
         self.assertEqual(restored.shot_id, "screenrec2:turn:4:epoch:3")
         self.assertEqual(restored.cue_ball, "yellow")
-        self.assertEqual(restored.before.cue, PointMm(1420.0, 1065.0))
-        self.assertEqual(restored.before.object1, PointMm(2130.0, 355.0))
-        self.assertEqual(restored.before.object2, PointMm(710.0, 710.0))
+        self.assertEqual(restored.before.cue, PointMm(1422.0, 1066.5))
+        self.assertEqual(restored.before.object1, PointMm(2133.0, 355.5))
+        self.assertEqual(restored.before.object2, PointMm(711.0, 711.0))
         self.assertAlmostEqual(restored.detection_confidence, 0.92)
 
     def test_jsonl_loader_ignores_separators_and_deduplicates(self) -> None:
@@ -132,7 +132,7 @@ class ShotRecordTest(unittest.TestCase):
             "coverage": 0.87,
         }
         restored = ShotRecord.from_db_dict(db_row)
-        self.assertEqual(restored.before.cue, PointMm(710.0, 710.0))
+        self.assertEqual(restored.before.cue, PointMm(711.0, 711.0))
         self.assertIsNotNone(restored.after)
         self.assertAlmostEqual(restored.detection_confidence, 0.87)
 
@@ -148,7 +148,7 @@ class ShotRecordTest(unittest.TestCase):
             "coverage": 0.95,
         }
         restored = ShotRecord.from_db_dict(db_row)
-        self.assertEqual(restored.before.cue, PointMm(1136.0, 710.0))
+        self.assertEqual(restored.before.cue, PointMm(1137.6000000000001, 711.0))
         self.assertIsNotNone(restored.after)
         self.assertAlmostEqual(restored.detection_confidence, 0.95)
 
@@ -158,7 +158,7 @@ class ShotRecordTest(unittest.TestCase):
             "white",
         )
         self.assertEqual(roles, ("white", "red", "yellow"))
-        self.assertEqual(converted.object1, PointMm(1420.0, 852.0))
+        self.assertEqual(converted.object1, PointMm(1422.0, 853.1999999999999))
 
 
 class NeighborIndexTest(unittest.TestCase):

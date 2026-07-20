@@ -32,8 +32,8 @@ class PreCutLayoutBuffer:
     ) -> None:
         if buffer_seconds <= 0:
             raise ValueError("buffer_seconds must be positive")
-        if sample_count < 3:
-            raise ValueError("sample_count must be at least 3")
+        if sample_count < 1:
+            raise ValueError("sample_count must be at least 1")
         self.buffer_seconds = buffer_seconds
         self.sample_count = sample_count
         self.max_step = max_step
@@ -62,19 +62,20 @@ class PreCutLayoutBuffer:
         if cut_timestamp - selected[-1].timestamp > self.max_cut_gap:
             return None
 
-        steps = [
-            self._layout_distance(first.positions, second.positions)
-            for first, second in zip(selected, selected[1:])
-        ]
-        span = self._layout_distance(
-            selected[0].positions, selected[-1].positions
-        )
-        if max(steps) > self.max_step or span > self.max_span:
-            return None
+        if len(selected) >= 2:
+            steps = [
+                self._layout_distance(first.positions, second.positions)
+                for first, second in zip(selected, selected[1:])
+            ]
+            span = self._layout_distance(
+                selected[0].positions, selected[-1].positions
+            )
+            if max(steps) > self.max_step or span > self.max_span:
+                return None
 
-        # Allow small jitter, but reject a clear acceleration immediately before the cut.
-        if steps[-1] > steps[-2] * 1.35 + 0.003:
-            return None
+            # Allow small jitter, but reject a clear acceleration immediately before the cut.
+            if len(steps) >= 2 and steps[-1] > steps[-2] * 1.35 + 0.003:
+                return None
 
         positions = {
             name: (
