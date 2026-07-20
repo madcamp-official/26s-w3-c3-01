@@ -1,12 +1,13 @@
 # 턴 단위 데이터 추출: 영상 → 매 샷의 (직전 배치, 수구, 성공 여부, 이후 배치)
-# 성공 판정(1순위): 방송 점수판 OCR — 샷 구간에 수구 색 점수가 +1/+2 오르면 성공.
-#   점수판은 오퍼레이터가 올리는 사실상의 정답이라 궤적 분석보다 정확하다.
+# 성공 판정: 방송 점수판 OCR 전용 — 샷 구간에 수구 색 점수가 +1(+2=뱅크샷) 오르면 성공.
+#   점수판은 오퍼레이터가 올리는 사실상의 정답이다.
 #   (PBA 점수판: 흰 박스=흰 수구 선수, 노란 박스=노란 수구 선수 → 수구와 바로 매칭)
-# 성공 판정(폴백): 점수판을 못 찾거나 판독 불가 구간은 기존 궤적 분석 —
-#   수구 궤적에서 "두 목적구 접촉 + 두 번째 접촉 전 쿠션 3회"를 직접 계산.
+# 점수판으로 판정할 수 없는 턴(판독 끊김·점수 튐·기준값 없음)은 폐기한다.
+#   궤적(쿠션 세기) 판정은 신뢰도가 낮아 라벨로 쓰지 않는다 — 점수판이 아예 없는
+#   영상(스포방지 마스킹·화면기록 등)은 전 턴 폐기되어 0턴이 된다.
 # 출력: turns.jsonl, turns.csv (+ --save-frames 시 qa/ 폴더에 직전/이후 프레임)
 # 사용법: venv/bin/python extract_turns.py 영상경로 [--video-id ID] [--outdir DIR] [--every N]
-#         [--no-scoreboard] 점수판 판정 끄기(궤적 판정만 사용)
+#         [--no-scoreboard] (디버그 전용) 점수판 없이 궤적 판정으로 저장 — 파이프라인엔 쓰지 않음
 import argparse
 import csv
 import json
@@ -314,6 +315,13 @@ def drop_replay_turns(turns, reader):
     return kept, dropped
 
 
+def drop_unjudged_turns(turns):
+    """점수판 판정을 받지 못한 턴 폐기 (정책: 쿠션/궤적 판정은 라벨로 쓰지 않음).
+    반환: (남긴 턴, 버린 수). 남긴 턴은 저장 시 1부터 다시 번호가 매겨진다."""
+    kept = [t for t in turns if t["success_detail"].get("method") == "scoreboard"]
+    return kept, len(turns) - len(kept)
+
+
 def apply_scoreboard_judgment(turns, reader, fps):
     """점수판 이벤트로 턴별 성공 여부를 재판정한다.
     턴 i의 창 = [frame_start_i, frame_start_{i+1}) — 득점 반영은 다음 샷 전에 이뤄진다.
@@ -371,7 +379,7 @@ def main():
     parser.add_argument("--save-frames", action="store_true",
                         help="턴별 직전/이후 프레임을 qa/ 폴더에 저장")
     parser.add_argument("--no-scoreboard", action="store_true",
-                        help="점수판 OCR 판정 끄기 (궤적 판정만 사용)")
+                        help="(디버그 전용) 점수판 없이 궤적 판정으로 저장 — 파이프라인엔 쓰지 말 것")
     args = parser.parse_args()
     video_id = args.video_id or os.path.splitext(os.path.basename(args.video))[0]
     os.makedirs(args.outdir, exist_ok=True)
@@ -466,7 +474,7 @@ def main():
     extractor.flush(frame_idx)
     cap.release()
 
-    # 점수판 기반: ① 리플레이 유령 턴 제거 → ② 성공 재판정 (판독 실패 턴은 궤적 유지)
+    # 점수판 기반: ① 리플레이 유령 턴 제거 → ② 성공 판정 → ③ 판정 불가 턴 폐기
     if score_reader and score_reader.locked and score_reader.events:
         kept, dropped = drop_replay_turns(extractor.turns, score_reader)
         for t, frac in dropped:
@@ -474,10 +482,13 @@ def main():
                   f"(점수판 노출 {frac:.0%})")
         extractor.turns = kept
         n_sb = apply_scoreboard_judgment(extractor.turns, score_reader, fps)
-        print(f"점수판 판정: {n_sb}/{len(extractor.turns)}턴 적용, 유령 턴 {len(dropped)}개 제거 "
-              f"(점수 이벤트 {len(score_reader.events)}개, 나머지는 궤적 판정 유지)")
+        extractor.turns, n_unjudged = drop_unjudged_turns(extractor.turns)
+        print(f"점수판 판정: {n_sb}턴 확정 | 폐기: 유령 턴 {len(dropped)}개, "
+              f"판정 불가 {n_unjudged}개 (점수 이벤트 {len(score_reader.events)}개)")
     elif score_reader:
-        print("점수판 미검출 → 전 턴 궤적 판정 유지")
+        # 점수판이 아예 없는 영상(스포방지·화면기록 등) → 라벨 신뢰 불가, 전 턴 폐기
+        print(f"점수판 미검출 → 전 {len(extractor.turns)}턴 폐기 (점수판 없는 영상은 데이터로 쓰지 않음)")
+        extractor.turns = []
 
     turns = extractor.turns
     jsonl_path = os.path.join(args.outdir, "turns.jsonl")

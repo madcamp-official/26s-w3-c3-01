@@ -113,25 +113,31 @@ def load(conn, sources):
     with conn.cursor() as cur:
         for vid, text in sources:
             recs = parse_jsonl(text)
-            if not recs:
-                print(f"  {vid}: 턴 0개 — 건너뜀", flush=True)
-                continue
-            rows = [row_of(r) for r in recs]
-            execute_values(cur, UPSERT_SQL, rows, template=ROW_TEMPLATE)
-            # 재추출로 턴 수가 줄었을 때 남는 옛 행(유령 데이터) 제거 —
-            # turns.jsonl 은 항상 영상 전체 추출본이므로 그보다 큰 turn 은 구버전 잔재다.
-            cur.execute("DELETE FROM billiard_turns WHERE video_id=%s AND turn > %s",
-                        (vid, len(recs)))
+            # 정책: 점수판(scoreboard) 판정 턴만 신뢰해 적재한다.
+            # 궤적(쿠션) 판정 턴은 구버전 파일에만 남아 있으며 여기서 걸러진다.
+            keep = [r for r in recs
+                    if (r.get("success_detail") or {}).get("method") == "scoreboard"]
+            if len(keep) != len(recs):
+                print(f"  {vid}: 점수판 판정 아닌 {len(recs) - len(keep)}턴 제외", flush=True)
+            if keep:
+                rows = [row_of(r) for r in keep]
+                execute_values(cur, UPSERT_SQL, rows, template=ROW_TEMPLATE)
+            # DB를 파일(필터 후)과 미러링: 파일에 없는 턴 행은 제거한다.
+            # 재추출로 사라진 턴·정책으로 제외된 턴·유령 행이 전부 정리된다.
+            # keep 이 비면 [0] → 어떤 턴(1부터)과도 안 맞아 전부 삭제된다.
+            cur.execute(
+                "DELETE FROM billiard_turns WHERE video_id=%s AND NOT (turn = ANY(%s))",
+                (vid, [r["turn"] for r in keep] or [0]))
             cur.execute(
                 "INSERT INTO billiard_ingest_log (video_id, n_turns, loaded_at) "
                 "VALUES (%s, %s, now()) "
                 "ON CONFLICT (video_id) DO UPDATE SET n_turns=EXCLUDED.n_turns, "
                 "loaded_at=now()",
-                (vid, len(recs)))
+                (vid, len(keep)))
             conn.commit()
-            print(f"  {vid}: {len(recs)}턴 upsert 완료", flush=True)
+            print(f"  {vid}: {len(keep)}턴 적재", flush=True)
             total_videos += 1
-            total_turns += len(recs)
+            total_turns += len(keep)
     return total_videos, total_turns
 
 
