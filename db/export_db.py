@@ -23,7 +23,7 @@ conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 cur.execute("""
     SELECT video_id, turn, epoch, shooter, success, success_method, coverage,
-           cushions_before_2nd, hits, before_pos, after_pos, after_source,
+           cushions_before_2nd, bank_shot, hits, before_pos, after_pos, after_source,
            frame_start, frame_end, time_start_s, time_end_s, loaded_at
     FROM billiard_turns
     ORDER BY video_id, turn

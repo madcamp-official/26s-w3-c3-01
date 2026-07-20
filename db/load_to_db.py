@@ -24,10 +24,11 @@ SCHEMA_SQL = os.path.join(HERE, "schema.sql")
 
 COLUMNS = ("video_id", "turn", "epoch", "shooter", "success", "success_method",
            "coverage", "cushions_before_2nd", "hits", "before_pos", "after_pos",
-           "after_source", "frame_start", "frame_end", "time_start_s", "time_end_s")
+           "after_source", "frame_start", "frame_end", "time_start_s", "time_end_s",
+           "bank_shot")
 
 # execute_values 템플릿: hits/before_pos/after_pos(9,10,11번째)는 json 문자열 → jsonb 캐스팅
-ROW_TEMPLATE = ("(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s)")
+ROW_TEMPLATE = ("(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s)")
 
 UPSERT_SQL = f"""
 INSERT INTO billiard_turns ({", ".join(COLUMNS)}) VALUES %s
@@ -38,7 +39,7 @@ ON CONFLICT (video_id, turn) DO UPDATE SET
   before_pos=EXCLUDED.before_pos, after_pos=EXCLUDED.after_pos,
   after_source=EXCLUDED.after_source, frame_start=EXCLUDED.frame_start,
   frame_end=EXCLUDED.frame_end, time_start_s=EXCLUDED.time_start_s,
-  time_end_s=EXCLUDED.time_end_s, loaded_at=now();
+  time_end_s=EXCLUDED.time_end_s, bank_shot=EXCLUDED.bank_shot, loaded_at=now();
 """
 
 
@@ -52,6 +53,7 @@ def row_of(rec):
         json.dumps(rec["before"]), json.dumps(rec["after"]), rec.get("after_source"),
         rec.get("frame_start"), rec.get("frame_end"),
         rec.get("time_start_s"), rec.get("time_end_s"),
+        d.get("bank_shot"),
     )
 
 
@@ -116,6 +118,10 @@ def load(conn, sources):
                 continue
             rows = [row_of(r) for r in recs]
             execute_values(cur, UPSERT_SQL, rows, template=ROW_TEMPLATE)
+            # 재추출로 턴 수가 줄었을 때 남는 옛 행(유령 데이터) 제거 —
+            # turns.jsonl 은 항상 영상 전체 추출본이므로 그보다 큰 turn 은 구버전 잔재다.
+            cur.execute("DELETE FROM billiard_turns WHERE video_id=%s AND turn > %s",
+                        (vid, len(recs)))
             cur.execute(
                 "INSERT INTO billiard_ingest_log (video_id, n_turns, loaded_at) "
                 "VALUES (%s, %s, now()) "

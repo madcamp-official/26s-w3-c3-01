@@ -7,7 +7,11 @@
 
 - `before`: 샷 직전 공 3개 위치 (당구대 기준 0~1 정규화, [x, y])
 - `shooter`: 수구 (white / yellow) — 정지 배치에서 가장 먼저 움직인 공
-- `success`: 3쿠션 성공 여부 — 수구 궤적에서 "두 목적구 접촉 + 두 번째 접촉 전 쿠션 3회"를 직접 계산
+- `success`: 3쿠션 성공 여부 — **방송 점수판 OCR이 1순위**: 샷 구간에 수구 색 점수가 +1(+2=뱅크샷)
+  오르면 성공. 점수판은 오퍼레이터가 올리는 사실상의 정답이라 궤적 분석보다 정확하다.
+  (PBA 점수판은 흰 박스=흰 수구 선수, 노란 박스=노란 수구 선수라 수구와 바로 매칭)
+  점수판을 못 찾거나 판독이 끊긴 턴은 궤적 분석("두 목적구 접촉 + 두 번째 접촉 전 쿠션 3회")으로 폴백.
+  `success_detail.method` 로 어느 판정인지 구분: `scoreboard` / `trajectory` / `insufficient`
 - `after`: 샷 이후 공 3개 위치 (`after_source: settled`=정지 확인, `last_seen`=영상 컷으로 마지막 관측값)
 
 ---
@@ -82,7 +86,8 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
 */10 * * * * cd /Users/parkminsu/26s-w3-c3-01 && source db/db.env && venv/bin/python src/process_queue.py >> logs/worker.log 2>&1
 ```
 
-**필요 도구:** `venv/bin/yt-dlp`, JS 런타임(node)이 PATH에, 로컬 AWS 자격증명(`~/.aws/credentials`).
+**필요 도구:** `venv/bin/yt-dlp`, JS 런타임(node)이 PATH에, 로컬 AWS 자격증명(`~/.aws/credentials`),
+점수판 OCR용 `tesseract` (`brew install tesseract` — 없으면 궤적 판정으로 자동 폴백).
 
 ---
 
@@ -95,6 +100,7 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
 | `detect_pipeline.py` | 당구대 꼭짓점 검출 + 픽셀→정규화 좌표 변환 |
 | `detect_video.py` | 프레임별 탐지/미니맵 합성 영상 + 시뮬레이션 확률 (시각화용) |
 | `extract_turns.py` | 턴 단위 데이터 추출 (배치/서버용 핵심 모듈) |
+| `scoreboard.py` | 방송 점수판 OCR (박스 자동 탐지 + 점수 변화 이벤트) |
 | `process_queue.py` | 유튜브 링크 큐 워커 (다운로드 → 추출 → S3 업로드) |
 | `simulate.py` | 3쿠션 물리 시뮬레이션 (성공 확률 추정) |
 | `best_3cls.pt` | YOLO 공 탐지 모델 (white/yellow/red) |
@@ -117,7 +123,8 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
  "after":  {"white": [0.15, 0.44], "yellow": [0.55, 0.80], "red": [0.61, 0.22]},
  "after_source": "settled",
  "success": true,
- "success_detail": {"method": "trajectory", "coverage": 0.87,
+ "success_detail": {"method": "scoreboard", "score_steps": [[1620, 0, 1]],
+                    "bank_shot": false, "traj_success": true, "coverage": 0.87,
                     "hits": ["red", "white"], "cushions_before_2nd": 4},
  "frame_start": 1520, "frame_end": 1893,
  "time_start_s": 50.7, "time_end_s": 63.1}
@@ -125,3 +132,7 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
 
 - `epoch`: 탑뷰가 길게 끊길 때마다 증가하는 클립 번호. 같은 epoch 안의 연속 턴만 시간적으로 이어진 것.
 - `success: null` = 궤적 관측이 부족해 판정 보류 (`success_detail.method: "insufficient"`).
+- `score_steps`: 점수판 판정 근거 — 샷 창에서 관측된 점수 변화 `[프레임, 흰Δ, 노랑Δ]` 목록.
+- `bank_shot`: 점수가 한 번에 +2 오른 성공 = 뱅크샷(3쿠션 선행 후 두 목적구 접촉, PBA 2점).
+  점수판 판정 턴에만 채워짐 (궤적 판정 턴은 DB에서 `NULL`).
+- `traj_success`: 점수판 판정으로 덮어쓰기 전 궤적 판정 결과 (두 판정 비교·QA용).

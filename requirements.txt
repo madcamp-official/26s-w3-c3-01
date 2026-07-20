@@ -50,3 +50,4 @@ ultralytics-thop==2.0.20
 urllib3==2.7.0
 yt-dlp==2026.07.04
 boto3
+pytesseract  # 점수판 OCR — tesseract 바이너리 필요 (brew install tesseract)
