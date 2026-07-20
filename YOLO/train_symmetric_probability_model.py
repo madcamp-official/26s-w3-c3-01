@@ -90,7 +90,10 @@ def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Train Symmetric Hybrid v2")
     parser.add_argument(
-        "shots", nargs="?", type=Path, default=root.parent / "billiard_turns_export.jsonl"
+        "shots",
+        nargs="?",
+        type=Path,
+        default=root.parent / "billiard._public_._billiard_turns_.json",
     )
     parser.add_argument(
         "--out", type=Path, default=root / "outputs" / "symmetric_hybrid_v2"
@@ -100,7 +103,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    records = load_shot_records(args.shots.resolve())
+    loaded_records = load_shot_records(args.shots.resolve())
+    records = [record for record in loaded_records if record.cue_ball in ("white", "yellow")]
     if len({record.success for record in records}) < 2:
         raise ValueError("Symmetric CatBoost requires success and failure records")
     output = args.out.resolve()
@@ -132,6 +136,8 @@ def main() -> None:
         )
     report = {
         "engineVersion": "symmetric-hybrid-v2",
+        "inputRecords": len(loaded_records),
+        "rejectedRecords": len(loaded_records) - len(records),
         "records": len(records),
         "successes": sum(record.success for record in records),
         "modelVersion": model.version,

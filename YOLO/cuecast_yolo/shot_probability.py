@@ -103,12 +103,16 @@ class ShotRecord:
         """Read the newline-delimited DB record used by ``data``."""
         shooter = str(value["shooter"])
         before_value = value.get("before", value.get("before_pos"))
+        if isinstance(before_value, str):
+            before_value = json.loads(before_value)
         if not isinstance(before_value, dict):
             raise ValueError("DB shot record requires before or before_pos coordinates")
         before, _ = layout_from_normalized_colors(
             before_value, shooter
         )
         after_value = value.get("after", value.get("after_pos"))
+        if isinstance(after_value, str):
+            after_value = json.loads(after_value)
         after = (
             layout_from_normalized_colors(after_value, shooter)[0]  # type: ignore[arg-type]
             if isinstance(after_value, dict)

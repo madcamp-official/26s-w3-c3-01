@@ -38,7 +38,10 @@ class SymmetricProbabilityService:
         calibration_path: Path,
         report_path: Path,
     ) -> None:
-        self.records = load_shot_records(shots_path)
+        loaded_records = load_shot_records(shots_path)
+        self.records = [
+            record for record in loaded_records if record.cue_ball in ("white", "yellow")
+        ]
         self.model = SymmetricCatBoostCoordinateModel.load(model_path)
         self.calibration = load_calibration(calibration_path)
         self.report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -210,7 +213,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve Symmetric Hybrid v2")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8767)
-    parser.add_argument("--shots", type=Path, default=root.parent / "billiard_turns_export.jsonl")
+    parser.add_argument(
+        "--shots",
+        type=Path,
+        default=root.parent / "billiard._public_._billiard_turns_.json",
+    )
     parser.add_argument("--model", type=Path, default=output / "model.json")
     parser.add_argument("--calibration", type=Path, default=output / "calibration.json")
     parser.add_argument("--report", type=Path, default=output / "training_report.json")

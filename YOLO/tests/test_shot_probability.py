@@ -136,6 +136,22 @@ class ShotRecordTest(unittest.TestCase):
         self.assertIsNotNone(restored.after)
         self.assertAlmostEqual(restored.detection_confidence, 0.87)
 
+    def test_db_export_accepts_json_encoded_position_columns(self) -> None:
+        db_row = {
+            "video_id": "database-export",
+            "turn": 2,
+            "epoch": 1,
+            "shooter": "yellow",
+            "before_pos": '{"white":[0.2,0.3],"yellow":[0.4,0.5],"red":[0.6,0.7]}',
+            "after_pos": '{"white":[0.3,0.3],"yellow":[0.5,0.5],"red":[0.7,0.7]}',
+            "success": False,
+            "coverage": 0.95,
+        }
+        restored = ShotRecord.from_db_dict(db_row)
+        self.assertEqual(restored.before.cue, PointMm(1136.0, 710.0))
+        self.assertIsNotNone(restored.after)
+        self.assertAlmostEqual(restored.detection_confidence, 0.95)
+
     def test_layout_roles_are_deterministic(self) -> None:
         converted, roles = layout_from_normalized_colors(
             {"white": [0.1, 0.2], "yellow": [0.3, 0.4], "red": [0.5, 0.6]},

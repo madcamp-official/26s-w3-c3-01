@@ -17,17 +17,19 @@
 
 ## 현재 모델
 
-- 원본 기록: 503건
+- 입력 기록: 1,009건
+- 사용 기록: 1,008건 (비정상 빨간 수구 1건 제외)
 - CatBoost: iterations 75, depth 3, learning rate 0.03
 - Regularization: l2_leaf_reg 30, random_strength 1
 - Class weight: 사용하지 않음
 - Grid: 4×2 → 8×4 → 16×8
 - 분할 기준: 부모 6건, 자식 2건, 성공률 차이 20%p
-- 실제 선택: Level 0 421건, Level 1 76건, Level 2 6건
-- 활성 부모: Level 1 11개, Level 2 1개
-- 경기 단위 OOF Log Loss: 0.669205
-- 경기 단위 OOF Brier Score: 0.238283
-- 0.5 기준 OOF 분류 정확도: 57.26%
+- 실제 선택: Level 0 760건, Level 1 242건, Level 2 6건
+- 활성 부모: Level 1 22개, Level 2 1개
+- 경기 단위 OOF 그룹: 10개 영상
+- 경기 단위 OOF Log Loss: 0.680945
+- 경기 단위 OOF Brier Score: 0.244013
+- 0.5 기준 OOF 분류 정확도: 57.24%
 
 ## 학습
 
