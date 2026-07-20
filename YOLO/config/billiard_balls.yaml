@@ -1,0 +1,10 @@
+# YOLO 데이터셋 루트. 실제 데이터 위치에 맞게 수정하세요.
+path: ../datasets/billiard_balls
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: white_ball
+  1: yellow_ball
+  2: red_ball

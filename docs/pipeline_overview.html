@@ -1,0 +1,250 @@
+<meta charset="utf-8">
+<title>당구 데이터 파이프라인 — 구축 현황</title>
+<style>
+  :root {
+    --bg: #F4F6F4; --surface: #FFFFFF; --surface-2: #F0F3F0;
+    --ink: #16201B; --muted: #5B6B62; --line: #DEE4E0;
+    --felt: #2C7D59; --felt-soft: #E3F1E9; --cue: #37699E; --cue-soft: #E5EEF6;
+    --ok: #2E9E5B; --todo: #B57A17; --todo-soft: #F7EDD8; --danger: #C0392B;
+    --ink-invert: #F4F6F4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10140F; --surface: #171C16; --surface-2: #1E241D;
+      --ink: #E6ECE6; --muted: #96A69C; --line: #2A312A;
+      --felt: #4FB488; --felt-soft: #17281F; --cue: #6BA6D8; --cue-soft: #172532;
+      --ok: #57BA84; --todo: #D3A24C; --todo-soft: #34291593; --danger: #E06A5E;
+      --ink-invert: #10140F;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F6F4; --surface: #FFFFFF; --surface-2: #F0F3F0;
+    --ink: #16201B; --muted: #5B6B62; --line: #DEE4E0;
+    --felt: #2C7D59; --felt-soft: #E3F1E9; --cue: #37699E; --cue-soft: #E5EEF6;
+    --ok: #2E9E5B; --todo: #B57A17; --todo-soft: #F7EDD8; --danger: #C0392B;
+    --ink-invert: #F4F6F4;
+  }
+  :root[data-theme="dark"] {
+    --bg: #10140F; --surface: #171C16; --surface-2: #1E241D;
+    --ink: #E6ECE6; --muted: #96A69C; --line: #2A312A;
+    --felt: #4FB488; --felt-soft: #17281F; --cue: #6BA6D8; --cue-soft: #172532;
+    --ok: #57BA84; --todo: #D3A24C; --todo-soft: #342915; --danger: #E06A5E;
+    --ink-invert: #10140F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Apple SD Gothic Neo", Pretendard, "Noto Sans KR", system-ui, sans-serif;
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 44px 20px 90px; }
+  .eyebrow { font-size: .78rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--felt); font-weight: 700; margin: 0 0 8px; }
+  h1 { font-size: clamp(1.6rem, 4vw, 2.3rem); margin: 0 0 10px; letter-spacing: -.01em;
+    text-wrap: balance; line-height: 1.2; }
+  .lede { color: var(--muted); font-size: 1.02rem; margin: 0 0 22px; max-width: 62ch; }
+  .status-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-size: .82rem;
+    font-weight: 600; padding: 5px 12px; border-radius: 999px; }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pill.ok { background: var(--felt-soft); color: var(--felt); }
+  .pill.ok .dot { background: var(--felt); }
+  .pill.todo { background: var(--todo-soft); color: var(--todo); }
+  .pill.todo .dot { background: var(--todo); }
+
+  h2 { font-size: 1.18rem; margin: 46px 0 4px; letter-spacing: -.01em; }
+  h2 .num { color: var(--felt); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  .sub { color: var(--muted); font-size: .92rem; margin: 0 0 18px; }
+
+  /* 아키텍처 흐름 */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
+    gap: 0; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 16px; padding: 22px; }
+  @media (max-width: 720px) { .flow { grid-template-columns: 1fr; gap: 4px; } }
+  .node { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; text-align: center; }
+  .node .ic { font-size: 1.6rem; }
+  .node .t { font-weight: 700; margin-top: 4px; font-size: .98rem; }
+  .node .d { color: var(--muted); font-size: .8rem; margin-top: 3px; }
+  .node .env { display: inline-block; margin-top: 8px; font-size: .68rem; font-weight: 700;
+    letter-spacing: .05em; text-transform: uppercase; padding: 2px 8px; border-radius: 5px; }
+  .env.mac { background: var(--cue-soft); color: var(--cue); }
+  .env.aws { background: var(--felt-soft); color: var(--felt); }
+  .arrow { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 0 14px; color: var(--felt); font-weight: 700; }
+  .arrow .line { font-size: 1.4rem; line-height: 1; }
+  .arrow .lbl { font-size: .68rem; color: var(--muted); font-weight: 600;
+    margin-top: 3px; white-space: nowrap; }
+  @media (max-width: 720px) {
+    .arrow { padding: 4px 0; flex-direction: row; gap: 8px; }
+    .arrow .line { transform: rotate(90deg); }
+  }
+
+  .callout { background: var(--surface); border: 1px solid var(--line);
+    border-left: 4px solid var(--danger); border-radius: 12px; padding: 18px 20px; margin-top: 8px; }
+  .callout h3 { margin: 0 0 6px; font-size: 1.02rem; }
+  .callout p { margin: 0 0 12px; font-size: .92rem; color: var(--muted); }
+  table.evi { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  table.evi th, table.evi td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  table.evi th { color: var(--muted); font-weight: 600; font-size: .76rem; letter-spacing: .03em; }
+  table.evi td.res { font-weight: 700; }
+  .yes { color: var(--ok); } .no { color: var(--danger); }
+  .evi-wrap { overflow-x: auto; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card h3 { margin: 0 0 10px; font-size: .95rem; display: flex; align-items: center; gap: 8px; }
+  .card h3 .tag { font-size: .68rem; font-weight: 700; padding: 2px 8px; border-radius: 5px; letter-spacing: .04em; }
+  .tag.mac { background: var(--cue-soft); color: var(--cue); }
+  .tag.aws { background: var(--felt-soft); color: var(--felt); }
+  ul.list { margin: 0; padding: 0; list-style: none; }
+  ul.list li { padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: .88rem; display: flex; gap: 8px; }
+  ul.list li:last-child { border-bottom: 0; }
+  ul.list li code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: .82em; color: var(--ink); }
+  ul.list li .desc { color: var(--muted); }
+
+  .check { margin: 0; padding: 0; list-style: none; }
+  .check li { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: .92rem; }
+  .check li:last-child { border-bottom: 0; }
+  .check .mk { font-weight: 800; flex-shrink: 0; }
+  .check .mk.ok { color: var(--ok); }
+  .check .mk.todo { color: var(--todo); }
+  .check b { font-weight: 700; }
+  .check .meta { color: var(--muted); }
+
+  .next { background: var(--felt-soft); border: 1px solid var(--felt); border-radius: 12px;
+    padding: 18px 20px; margin-top: 8px; }
+  .next h3 { margin: 0 0 6px; color: var(--felt); font-size: 1.02rem; }
+  .next p { margin: 0; font-size: .92rem; }
+  .next code { background: var(--surface); padding: 1px 6px; border-radius: 5px;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: .85em; }
+  .foot { margin-top: 40px; color: var(--muted); font-size: .8rem; text-align: center; }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">🎱 3쿠션 당구 데이터 파이프라인</p>
+  <h1>유튜브 영상 링크 → 턴별 데이터 → PostgreSQL, 전 과정 자동화</h1>
+  <p class="lede">영상 속 매 턴의 공 위치(0~1), 수구, 성공 여부, 다음 배치를 뽑아 DB에 쌓는 시스템.
+    캠퍼스망이 클라우드 DB 포트를 막는 문제까지 우회해 완성 직전 단계입니다.</p>
+  <div class="status-row">
+    <span class="pill ok"><span class="dot"></span>추출·저장·적재·보안 완료</span>
+    <span class="pill todo"><span class="dot"></span>남은 것: cron 적용 명령 1줄</span>
+  </div>
+
+  <h2><span class="num">01</span>전체 구조</h2>
+  <p class="sub">연산은 맥에서 무료로(GPU 가속), 저장은 AWS에서. 맥은 S3에만 올리고, DB 적재는 AWS 안에서 처리.</p>
+  <div class="flow">
+    <div class="node">
+      <div class="ic">💻</div>
+      <div class="t">맥 (로컬)</div>
+      <div class="d">YOLO로 영상 분석<br>→ 턴 데이터 추출</div>
+      <span class="env mac">캠퍼스망</span>
+    </div>
+    <div class="arrow">
+      <div class="line">→</div>
+      <div class="lbl">업로드 · 443 ✓</div>
+    </div>
+    <div class="node">
+      <div class="ic">🪣</div>
+      <div class="t">S3 버킷</div>
+      <div class="d">billiard-turns-<br>mcamp3w</div>
+      <span class="env aws">AWS 서울</span>
+    </div>
+    <div class="arrow">
+      <div class="line">→</div>
+      <div class="lbl">읽기 · 내부</div>
+    </div>
+    <div class="node">
+      <div class="ic">🗄️</div>
+      <div class="t">EC2 로더 → RDS</div>
+      <div class="d">t3.micro가 S3 읽어<br>PostgreSQL에 적재</div>
+      <span class="env aws">AWS 서울 · VPC 내부</span>
+    </div>
+  </div>
+
+  <h2><span class="num">02</span>도중에 부딪힌 진짜 문제 — 그리고 우회</h2>
+  <div class="callout">
+    <h3>🚧 캠퍼스망이 AWS로 나가는 5432(DB 포트)를 차단</h3>
+    <p>맥에서 RDS에 직접 붙으려니 계속 타임아웃. 보안그룹을 전체 개방(0.0.0.0/0)해도 안 됐고,
+      아래 진단으로 <b>원인이 AWS가 아니라 학교 네트워크</b>임이 확정됐습니다.</p>
+    <div class="evi-wrap">
+      <table class="evi">
+        <thead><tr><th>테스트</th><th>결과</th><th>의미</th></tr></thead>
+        <tbody>
+          <tr><td>외부 공개 PostgreSQL 5432 (유럽)</td><td class="res yes">성공</td><td>맥의 5432 송신 자체는 됨</td></tr>
+          <tr><td>AWS 서울 443 (S3)</td><td class="res yes">성공</td><td>AWS엔 443으로는 닿음</td></tr>
+          <tr><td>AWS 서울 5432 (RDS)</td><td class="res no">타임아웃</td><td>AWS로 가는 5432만 막힘</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:14px;margin-bottom:0"><b style="color:var(--felt)">해결:</b>
+      맥은 <b>443으로 S3에만 업로드</b>(통과됨), RDS 적재는 <b>같은 VPC 안의 EC2</b>가 담당 →
+      막힌 구간을 아예 안 지나감. 공교롭게 앞서 설계한 S3 경유 구조가 그대로 정답이 됐습니다.</p>
+  </div>
+
+  <h2><span class="num">03</span>만든 것 — 코드</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>추출 파이프라인 <span class="tag mac">맥</span></h3>
+      <ul class="list">
+        <li><code>extract_turns.py</code><span class="desc">턴 페어링·수구 식별·성공 판정</span></li>
+        <li><code>detect_pipeline.py</code><span class="desc">당구대 검출(파랑·초록·회색 천 대응)</span></li>
+        <li><code>detect_video.py</code><span class="desc">탑뷰 판별(경계 접촉 필터)</span></li>
+        <li><code>process_queue.py</code><span class="desc">큐 처리 + S3 업로드 + 영상 삭제</span></li>
+        <li><code>best_3cls.pt</code><span class="desc">YOLO 공 탐지 모델</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>적재 로더 <span class="tag aws">AWS</span></h3>
+      <ul class="list">
+        <li><code>db/load_to_db.py</code><span class="desc">S3 → PostgreSQL upsert(중복 안 생김)</span></li>
+        <li><code>db/schema.sql</code><span class="desc">테이블 자동 생성</span></li>
+        <li><code>billiard_turns</code><span class="desc">턴별 데이터 테이블</span></li>
+        <li><code>billiard_ingest_log</code><span class="desc">영상별 적재 이력</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">04</span>만든 것 — AWS 리소스 (전부 서울 · 무료 티어)</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>🪣 S3 &amp; 🗄️ RDS</h3>
+      <ul class="list">
+        <li><code>S3</code><span class="desc">billiard-turns-mcamp3w (결과 + 코드)</span></li>
+        <li><code>RDS</code><span class="desc">billiard-db · PostgreSQL 18 · 무료 티어</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🖥️ EC2 &amp; 🔑 IAM</h3>
+      <ul class="list">
+        <li><code>EC2</code><span class="desc">billiard-loader · t3.micro · 무료 티어</span></li>
+        <li><code>IAM 역할</code><span class="desc">billiard-loader-role (S3 읽기)</span></li>
+        <li><code>보안그룹</code><span class="desc">RDS는 VPC 내부(172.31.0.0/16)만 허용</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="num">05</span>검증된 것</h2>
+  <ul class="check">
+    <li><span class="mk ok">✓</span><span><b>영상 추출</b> — 3개 영상(PBA 팀리그·챔피언십·LPBA)에서 <b>총 24턴</b> 추출, 천 색 3종(파랑·초록·회색) 모두 처리 <span class="meta">· 성공/실패 판정이 점수판·턴 교대와 일치</span></span></li>
+    <li><span class="mk ok">✓</span><span><b>맥 → S3 업로드</b> — 캠퍼스망(443)에서 결과 파일 정상 업로드</span></li>
+    <li><span class="mk ok">✓</span><span><b>EC2 → RDS 적재</b> — S3의 24턴을 PostgreSQL에 upsert 성공 <span class="meta">· 재실행해도 중복 없음</span></span></li>
+    <li><span class="mk ok">✓</span><span><b>보안 마무리</b> — RDS는 VPC 내부(<code style="font-size:.85em">172.31.0.0/16</code>)만 허용, EC2 SSH(22) 완전 차단 <span class="meta">· 임시로 열었던 0.0.0.0/0·맥 IP 규칙 모두 제거</span></span></li>
+  </ul>
+
+  <h2><span class="num">06</span>남은 것 — cron 적용 (준비 완료)</h2>
+  <div class="next">
+    <h3>딱 한 줄 남았습니다</h3>
+    <p>10분마다 <code>load_to_db.py --all</code>을 돌리는 cron 설정 스크립트를 만들어 S3에 올려뒀습니다.
+      <b>EC2 브라우저 터미널</b>에 아래 한 줄을 붙여넣으면 자동 적재가 시작됩니다 (등록 + 즉시 1회 실행까지).</p>
+    <p style="margin-top:12px;background:var(--surface);border:1px solid var(--line);border-radius:8px;
+      padding:12px 14px;font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.8rem;
+      overflow-x:auto;white-space:nowrap">cd ~/loader &amp;&amp; aws s3 cp s3://billiard-turns-mcamp3w/code/setup_cron.sh . --region ap-northeast-2 &amp;&amp; bash setup_cron.sh</p>
+    <p style="margin-top:12px">이후엔 <b>맥에서 추출 → S3 업로드</b>만 하면 10분마다 EC2가 알아서 RDS에 넣습니다.
+      (선택: 맥 쪽 추출도 cron/launchd로 자동화 가능 — 노트북이 켜져 있어야 하는 트레이드오프)</p>
+  </div>
+
+  <p class="foot">몰입캠프 · 3쿠션 당구 데이터 파이프라인 · 구축 현황 스냅샷</p>
+</div>
