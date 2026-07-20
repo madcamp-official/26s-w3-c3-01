@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 12
+names: ['-billiard-ball', 'Orange', 'Red', 'White', 'Yellow', 'billiard-ball-Red', 'billiard-ball-Yellow', 'billiard-ball-white', 'orange ball', 'red ball', 'white ball', 'yellow ball']
+
+roboflow:
+  workspace: -ahcxq
+  project: -wdzpn
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/-ahcxq/-wdzpn/dataset/1

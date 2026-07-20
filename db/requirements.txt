@@ -1,0 +1,3 @@
+# DB 로더 전용 의존성 (GPU 워커와 분리 — 로더는 DB 근처에서 실행)
+psycopg2-binary>=2.9
+boto3>=1.34
