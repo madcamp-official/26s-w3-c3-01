@@ -402,8 +402,9 @@ def main() -> None:
             for color in ("white", "yellow", "red")
         }
         confirmed = bool(analysis.get("confirmed"))
+        shooter_confirmed = bool(analysis.get("shooterConfirmed"))
         prediction = None
-        if confirmed:
+        if confirmed and shooter_confirmed:
             prediction = service.predict(
                 {
                     "before": before,

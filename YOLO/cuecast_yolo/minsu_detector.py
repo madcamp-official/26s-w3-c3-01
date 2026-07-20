@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .detector import BALL_NAMES, YOLOBallDetector
+from .table_edges import detect_inner_table_corners
 
 
 CLOTH_HSV_RANGES = (
@@ -108,6 +109,30 @@ def pixels_to_table(points: list[tuple[float, float]], corners: np.ndarray) -> n
     return cv2.perspectiveTransform(values, matrix).reshape(-1, 2)
 
 
+def valid_inner_corners(
+    inner: np.ndarray | None,
+    view: np.ndarray,
+    shape: tuple[int, ...],
+) -> bool:
+    """Reject an inner-boundary candidate that is not contained by the table view."""
+
+    if inner is None or not plausible_top_view(inner, shape):
+        return False
+    view_area = float(cv2.contourArea(view))
+    inner_area = float(cv2.contourArea(inner))
+    if view_area <= 0 or not 0.55 <= inner_area / view_area <= 1.01:
+        return False
+
+    height, width = shape[:2]
+    tolerance_x, tolerance_y = width * 0.015, height * 0.015
+    return bool(
+        inner[:, 0].min() >= view[:, 0].min() - tolerance_x
+        and inner[:, 0].max() <= view[:, 0].max() + tolerance_x
+        and inner[:, 1].min() >= view[:, 1].min() - tolerance_y
+        and inner[:, 1].max() <= view[:, 1].max() + tolerance_y
+    )
+
+
 class MinsuRealtimeDetector:
     """Minsu YOLO detector plus its per-frame top-view/camera-cut gate."""
 
@@ -115,23 +140,33 @@ class MinsuRealtimeDetector:
         self.detector = YOLOBallDetector(
             model_path, confidence=confidence, image_size=640
         )
+        # The cloth segmentation boundary is retained only for camera-view
+        # validation. Ball coordinates are normalized against the separately
+        # detected inner cushion seam (the physical 2844 x 1422 mm surface).
+        self.view_corners: np.ndarray | None = None
         self.reference_corners: np.ndarray | None = None
 
     def reset(self) -> None:
+        self.view_corners = None
         self.reference_corners = None
 
     def detect(self, frame: np.ndarray) -> TrackingFrame:
         fast = detect_corners_fast(frame)
         if self.reference_corners is None and plausible_top_view(fast, frame.shape):
             try:
-                self.reference_corners = find_table_corners(frame)
+                view_corners = find_table_corners(frame)
+                inner_corners = detect_inner_table_corners(frame)
+                if valid_inner_corners(inner_corners, view_corners, frame.shape):
+                    self.view_corners = view_corners
+                    self.reference_corners = inner_corners
             except (ValueError, cv2.error):
                 pass
 
         valid_view = bool(
-            self.reference_corners is not None
+            self.view_corners is not None
+            and self.reference_corners is not None
             and plausible_top_view(fast, frame.shape)
-            and float(np.abs(fast - self.reference_corners).max()) < 60.0
+            and float(np.abs(fast - self.view_corners).max()) < 60.0
         )
         if not valid_view or self.reference_corners is None:
             return TrackingFrame({}, {}, False)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from math import hypot
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from typing import Callable
@@ -9,7 +10,7 @@ import cv2
 
 from .detector import BALL_NAMES
 from .precut import PreCutLayoutBuffer
-from .scoreboard_reader import PbaScoreboardReader, StableScoreboardState
+from .scoreboard_reader import RealtimePbaScoreboardReader, ScoreboardReading
 from .stop_detector import BallStopDetector
 from .video_position_analyzer import VideoPositionAnalyzer
 
@@ -38,18 +39,19 @@ class YoutubeLiveWorker:
         callback: LayoutCallback,
         *,
         sample_fps: float = 10.0,
-        scoreboard_reader: PbaScoreboardReader | None = None,
+        scoreboard_reader: RealtimePbaScoreboardReader | None = None,
         scoreboard_callback: ScoreboardCallback | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.callback = callback
         self.sample_fps = sample_fps
-        self.scoreboard_reader = scoreboard_reader or PbaScoreboardReader()
+        self.scoreboard_reader = scoreboard_reader or RealtimePbaScoreboardReader()
         self.scoreboard_callback = scoreboard_callback
         self._lock = Lock()
         self._thread: Thread | None = None
         self._stop = Event()
         self._shooter = "white"
+        self._shooter_confirmed = False
         self._pending_sync_seconds: float | None = None
         self._status: dict[str, object] = {
             "running": False,
@@ -63,6 +65,7 @@ class YoutubeLiveWorker:
         with self._lock:
             self._stop = stop_event
             self._shooter = shooter
+            self._shooter_confirmed = False
             self._pending_sync_seconds = None
             self._status = {
                 "running": True,
@@ -72,7 +75,9 @@ class YoutubeLiveWorker:
                 "layouts": 0,
                 "completeFrames": 0,
                 "scoreboardDetected": False,
+                "scoreboardReaderEnabled": self.scoreboard_reader.enabled,
                 "scoreboard": None,
+                "shooterConfirmed": False,
                 "lastError": None,
             }
             self._thread = Thread(
@@ -102,6 +107,7 @@ class YoutubeLiveWorker:
             raise ValueError("shooter는 white 또는 yellow여야 합니다")
         with self._lock:
             self._shooter = shooter
+            self._shooter_confirmed = True
 
     def sync_to(self, seconds: float) -> None:
         if seconds < 0:
@@ -127,6 +133,28 @@ class YoutubeLiveWorker:
         with self._lock:
             self._status.update(values)
 
+    def _accept_scoreboard(
+        self, reading: ScoreboardReading, timestamp: float
+    ) -> None:
+        scoreboard = {
+            **reading.to_dict(),
+            "detectedAtSeconds": timestamp,
+        }
+        active_color = reading.active_color
+        with self._lock:
+            if active_color in ("white", "yellow"):
+                self._shooter = active_color
+                self._shooter_confirmed = True
+            self._status.update(
+                scoreboardDetected=True,
+                scoreboard=scoreboard,
+                lastScoreboardSeconds=timestamp,
+                shooter=self._shooter,
+                shooterConfirmed=self._shooter_confirmed,
+            )
+        if self.scoreboard_callback is not None:
+            self.scoreboard_callback(scoreboard)
+
     def _publish(
         self,
         positions: Layout,
@@ -140,6 +168,7 @@ class YoutubeLiveWorker:
     ) -> None:
         with self._lock:
             shooter = self._shooter
+            shooter_confirmed = self._shooter_confirmed
             layout_count = int(self._status.get("layouts", 0)) + int(confirmed)
             self._status.update(
                 layouts=layout_count,
@@ -162,11 +191,14 @@ class YoutubeLiveWorker:
                 "ballConfidences": confidences or {},
                 "trackingState": state,
                 "confirmed": confirmed,
+                "shooterConfirmed": shooter_confirmed,
             },
         )
 
     def _run(self, source: str, start_seconds: float, stop_event: Event) -> None:
         capture = None
+        scoreboard_stop = Event()
+        scoreboard_thread: Thread | None = None
         try:
             video = self.analyzer.resolve(source)
             capture = cv2.VideoCapture(video.media_url)
@@ -176,6 +208,35 @@ class YoutubeLiveWorker:
             step = max(1, round(fps / max(self.sample_fps, 0.1)))
             frame_number = max(0, round(start_seconds * fps))
             capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            scoreboard_queue: Queue[
+                tuple[int, int, float, object]
+            ] = Queue(maxsize=1)
+            scoreboard_epoch = 0
+
+            def scoreboard_loop() -> None:
+                active_epoch = -1
+                while not scoreboard_stop.is_set():
+                    try:
+                        epoch, sample_frame, sample_time, sample_image = (
+                            scoreboard_queue.get(timeout=0.1)
+                        )
+                    except Empty:
+                        continue
+                    if epoch != active_epoch:
+                        self.scoreboard_reader.reset()
+                        active_epoch = epoch
+                    reading = self.scoreboard_reader.sample(
+                        sample_frame, sample_image  # type: ignore[arg-type]
+                    )
+                    if reading is not None:
+                        self._accept_scoreboard(reading, sample_time)
+
+            scoreboard_thread = Thread(
+                target=scoreboard_loop,
+                name="cuecast-scoreboard-reader",
+                daemon=True,
+            )
+            scoreboard_thread.start()
             stop_detector = BallStopDetector(
                 stable_seconds=0.4,
                 stop_threshold=0.004,
@@ -188,7 +249,6 @@ class YoutubeLiveWorker:
                 max_span=0.04,
                 max_cut_gap=0.2,
             )
-            scoreboard_state = StableScoreboardState(confirmations=3)
             last_scoreboard_sample = -1.0
             previous_top_view = False
             last_published_positions: Layout | None = None
@@ -210,18 +270,23 @@ class YoutubeLiveWorker:
                     capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
                     stop_detector.reset()
                     precut_buffer.clear()
-                    scoreboard_state = StableScoreboardState(confirmations=3)
+                    scoreboard_epoch += 1
                     last_scoreboard_sample = -1.0
                     previous_top_view = False
                     last_published_positions = None
                     last_complete_confidences = {}
                     complete_frames = 0
+                    with self._lock:
+                        self._shooter_confirmed = False
                     self._update(
                         syncing=False,
                         lastSyncedSeconds=sync_seconds,
                         positionSeconds=sync_seconds,
                         completeFrames=0,
                         trackingState="syncing",
+                        scoreboardDetected=False,
+                        scoreboard=None,
+                        shooterConfirmed=False,
                     )
                 ok, frame = capture.read()
                 if not ok:
@@ -230,21 +295,15 @@ class YoutubeLiveWorker:
                 timestamp = frame_number / fps
                 if timestamp - last_scoreboard_sample >= 0.25:
                     last_scoreboard_sample = timestamp
-                    confirmed_scoreboard = scoreboard_state.update(
-                        self.scoreboard_reader.read(frame)
-                    )
-                    if confirmed_scoreboard is not None:
-                        scoreboard = {
-                            **confirmed_scoreboard.to_dict(),
-                            "detectedAtSeconds": timestamp,
-                        }
-                        self._update(
-                            scoreboardDetected=True,
-                            scoreboard=scoreboard,
-                            lastScoreboardSeconds=timestamp,
-                        )
-                        if self.scoreboard_callback is not None:
-                            self.scoreboard_callback(scoreboard)
+                    item = (scoreboard_epoch, frame_number, timestamp, frame.copy())
+                    try:
+                        scoreboard_queue.put_nowait(item)
+                    except Full:
+                        try:
+                            scoreboard_queue.get_nowait()
+                        except Empty:
+                            pass
+                        scoreboard_queue.put_nowait(item)
                 # 5e0cabe pipeline: acquire the table corners once from the first
                 # plausible top view, validate that reference on every frame, and
                 # use best_3cls.pt YOLO detections for the ball coordinates.
@@ -328,5 +387,8 @@ class YoutubeLiveWorker:
                 lastError=str(error),
             )
         finally:
+            scoreboard_stop.set()
+            if scoreboard_thread is not None:
+                scoreboard_thread.join(timeout=1.0)
             if capture is not None:
                 capture.release()

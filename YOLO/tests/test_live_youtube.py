@@ -7,6 +7,7 @@ import numpy as np
 
 from cuecast_yolo.live_youtube import YoutubeLiveWorker, layout_distance
 from cuecast_yolo.minsu_detector import TrackingFrame
+from cuecast_yolo.scoreboard_reader import ScoreboardReading
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -55,6 +56,23 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         worker = YoutubeLiveWorker(VideoPositionAnalyzer(), lambda *_: None)
         with self.assertRaisesRegex(ValueError, "0 이상"):
             worker.sync_to(-0.1)
+
+    def test_scoreboard_active_circle_automatically_sets_shooter(self) -> None:
+        layout_callback = MagicMock()
+        callback = MagicMock()
+        worker = YoutubeLiveWorker(
+            VideoPositionAnalyzer(), layout_callback, scoreboard_callback=callback
+        )
+        reading = ScoreboardReading(1, 2, 3, 4, 0, 1, "yellow", "white")
+
+        worker._accept_scoreboard(reading, 12.5)
+
+        status = worker.status()
+        self.assertEqual(status["shooter"], "yellow")
+        self.assertTrue(status["shooterConfirmed"])
+        self.assertEqual(status["scoreboard"]["activeColor"], "yellow")
+        callback.assert_called_once()
+        layout_callback.assert_not_called()
 
 
 if __name__ == "__main__":

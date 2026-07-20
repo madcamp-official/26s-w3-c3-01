@@ -20,16 +20,21 @@ class ScoreboardReading:
     player2_score: int
     player1_run: int
     player2_run: int
+    active_color: str | None = None
+    row1_color: str | None = None
 
-    def to_dict(self) -> dict[str, int]:
-        return {
+    def to_dict(self) -> dict[str, int | str | None]:
+        result: dict[str, int | str | None] = {
             "set": self.set_number,
             "inning": self.inning,
             "player1Score": self.player1_score,
             "player2Score": self.player2_score,
             "player1Run": self.player1_run,
             "player2Run": self.player2_run,
+            "activeColor": self.active_color,
+            "row1Color": self.row1_color,
         }
+        return result
 
 
 class SyntheticDigitRecognizer:
@@ -338,3 +343,368 @@ class StableScoreboardState:
         self.current = candidate
         self._history.clear()
         return candidate
+
+
+class TesseractDigitRecognizer:
+    """Digit-only OCR used by the fa6bfa5 PBA scoreboard pipeline."""
+
+    def __init__(self) -> None:
+        self.pytesseract = None
+        try:
+            import pytesseract
+
+            windows_binary = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+            if windows_binary.exists():
+                pytesseract.pytesseract.tesseract_cmd = str(windows_binary)
+            pytesseract.get_tesseract_version()
+            self.pytesseract = pytesseract
+        except Exception:
+            self.pytesseract = None
+
+    @property
+    def available(self) -> bool:
+        return self.pytesseract is not None
+
+    def __call__(self, image: np.ndarray, modes: tuple[int, ...] = (8, 7, 13)) -> int | None:
+        if not self.available or image.size == 0:
+            return None
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        up = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, threshold = cv2.threshold(
+            up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        threshold = cv2.copyMakeBorder(
+            threshold, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255
+        )
+        for mode in modes:
+            text = self.pytesseract.image_to_string(
+                threshold,
+                config=f"--psm {mode} -c tessedit_char_whitelist=0123456789",
+            )
+            digits = "".join(character for character in text if character.isdigit())
+            if digits:
+                return int(digits)
+        return None
+
+
+class RealtimePbaScoreboardReader:
+    """fa6bfa5 score boxes/circles adapted to the live CueCast status contract."""
+
+    YELLOW_LO = np.array([20, 110, 130])
+    YELLOW_HI = np.array([38, 255, 255])
+    WHITE_S_MAX = 60
+    WHITE_V_MIN = 170
+    LOCK_FRAMES = 5
+    HEARTBEAT_SAMPLES = 20
+
+    def __init__(
+        self,
+        recognizer: TesseractDigitRecognizer | None = None,
+        header_recognizer: DigitRecognizer | None = None,
+    ) -> None:
+        self.recognizer = recognizer or TesseractDigitRecognizer()
+        self.header_recognizer = header_recognizer or SyntheticDigitRecognizer()
+        self.enabled = self.recognizer.available
+        self.reset()
+
+    def reset(self) -> None:
+        self.box_white: tuple[int, int, int, int] | None = None
+        self.box_yellow: tuple[int, int, int, int] | None = None
+        self.circle_white: tuple[int, int, int, int] | None = None
+        self.circle_yellow: tuple[int, int, int, int] | None = None
+        self.panel_box: tuple[int, int, int, int] | None = None
+        self._box_candidates: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+        self._circle_candidates: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+        self._signature: np.ndarray | None = None
+        self._since_ocr = 0
+        self._pending: dict[str, tuple[object, int]] = {}
+        self._committed: dict[str, object] = {}
+
+    @property
+    def locked(self) -> bool:
+        return self.box_white is not None and self.box_yellow is not None
+
+    @property
+    def circles_locked(self) -> bool:
+        return self.circle_white is not None and self.circle_yellow is not None
+
+    def _try_locate_boxes(self, frame: np.ndarray) -> None:
+        height, width = frame.shape[:2]
+        y0 = int(height * 0.55)
+        roi = frame[y0:height, : int(width * 0.5)]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.YELLOW_LO, self.YELLOW_HI)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        frame_area = height * width
+        found = None
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if not 0.0008 * frame_area < w * h < 0.02 * frame_area:
+                continue
+            if cv2.contourArea(contour) / max(w * h, 1) < 0.85:
+                continue
+            if not 0.5 < w / max(h, 1) < 2.2:
+                continue
+            for offset in (-h, h):
+                white_y = y + offset
+                if white_y < 0 or white_y + h > roi.shape[0]:
+                    continue
+                white = hsv[white_y : white_y + h, x : x + w]
+                fraction = np.mean(
+                    (white[..., 1] < self.WHITE_S_MAX)
+                    & (white[..., 2] > self.WHITE_V_MIN)
+                )
+                if fraction > 0.55:
+                    found = ((x, white_y + y0, w, h), (x, y + y0, w, h))
+                    break
+            if found:
+                break
+        if found is None:
+            self._box_candidates.clear()
+            return
+        self._box_candidates.append(found)
+        if len(self._box_candidates) < self.LOCK_FRAMES:
+            return
+        values = np.asarray(self._box_candidates)
+        median = np.median(values, axis=0).astype(int)
+        if np.abs(values - median).max() > max(median[0, 2], median[0, 3]):
+            self._box_candidates = self._box_candidates[-1:]
+            return
+        self.box_white = tuple(int(value) for value in median[0])
+        self.box_yellow = tuple(int(value) for value in median[1])
+        top = min((self.box_white, self.box_yellow), key=lambda box: box[1])
+        panel_width = round(top[2] / 0.11)
+        panel_height = round(top[3] / 0.35)
+        panel_x = round(top[0] - 0.715 * panel_width)
+        panel_y = round(top[1] - 0.29 * panel_height)
+        self.panel_box = (
+            max(0, panel_x),
+            max(0, panel_y),
+            min(width - max(0, panel_x), panel_width),
+            min(height - max(0, panel_y), panel_height),
+        )
+
+    def _find_circle(
+        self, frame: np.ndarray, box: tuple[int, int, int, int], color: str
+    ) -> tuple[int, int, int, int] | None:
+        x, y, w, h = box
+        x1, x2 = x + w, min(frame.shape[1], x + w + 3 * w)
+        y1, y2 = max(0, y - h // 3), min(frame.shape[0], y + h + h // 3)
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        if color == "white":
+            mask = (
+                (hsv[..., 1] < self.WHITE_S_MAX)
+                & (hsv[..., 2] > self.WHITE_V_MIN)
+            ).astype(np.uint8) * 255
+        else:
+            mask = cv2.inRange(hsv, self.YELLOW_LO, self.YELLOW_HI)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        for contour in contours:
+            bx, by, bw, bh = cv2.boundingRect(contour)
+            extent = cv2.contourArea(contour) / max(bw * bh, 1)
+            if not 0.5 * h < bh < 1.4 * h or not 0.7 < bw / max(bh, 1) < 1.4:
+                continue
+            if not 0.6 < extent < 0.92:
+                continue
+            if best is None or bx < best[0]:
+                best = (bx, by, bw, bh)
+        if best is None:
+            return None
+        bx, by, bw, bh = best
+        return x1 + bx, y1 + by, bw, bh
+
+    def _try_locate_circles(self, frame: np.ndarray) -> None:
+        assert self.box_white is not None and self.box_yellow is not None
+        white = self._find_circle(frame, self.box_white, "white")
+        yellow = self._find_circle(frame, self.box_yellow, "yellow")
+        if white is None or yellow is None:
+            self._circle_candidates.clear()
+            return
+        self._circle_candidates.append((white, yellow))
+        if len(self._circle_candidates) < self.LOCK_FRAMES:
+            return
+        values = np.asarray(self._circle_candidates)
+        median = np.median(values, axis=0).astype(int)
+        if np.abs(values - median).max() > max(median[0, 2], median[0, 3]):
+            self._circle_candidates = self._circle_candidates[-1:]
+            return
+        self.circle_white = tuple(int(value) for value in median[0])
+        self.circle_yellow = tuple(int(value) for value in median[1])
+        self._signature = None
+
+    @staticmethod
+    def _crop(
+        image: np.ndarray, box: tuple[float, float, float, float]
+    ) -> np.ndarray:
+        height, width = image.shape[:2]
+        x1, y1, x2, y2 = box
+        return image[
+            round(y1 * height) : round(y2 * height),
+            round(x1 * width) : round(x2 * width),
+        ]
+
+    def _read_colored(
+        self, frame: np.ndarray, box: tuple[int, int, int, int], color: str
+    ) -> int | None:
+        x, y, w, h = box
+        crop = frame[y : y + h, x : x + w]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        if color == "white":
+            fraction = np.mean(
+                (hsv[..., 1] < self.WHITE_S_MAX)
+                & (hsv[..., 2] > self.WHITE_V_MIN)
+            )
+        else:
+            fraction = np.mean(cv2.inRange(hsv, self.YELLOW_LO, self.YELLOW_HI) > 0)
+        if fraction < 0.45:
+            return None
+        value = self.recognizer(crop)
+        return value if value is not None and value <= 40 else None
+
+    def _read_circle(
+        self, frame: np.ndarray, box: tuple[int, int, int, int], color: str
+    ) -> tuple[int | None, bool]:
+        x, y, w, h = box
+        crop = frame[y : y + h, x : x + w]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        if color == "white":
+            fraction = np.mean(
+                (hsv[..., 1] < self.WHITE_S_MAX)
+                & (hsv[..., 2] > self.WHITE_V_MIN)
+            )
+        else:
+            fraction = np.mean(cv2.inRange(hsv, self.YELLOW_LO, self.YELLOW_HI) > 0)
+        if fraction < 0.35:
+            return None, False
+        margin = max(2, int(0.18 * min(w, h)))
+        inner = cv2.cvtColor(crop[margin : h - margin, margin : w - margin], cv2.COLOR_BGR2GRAY)
+        if inner.size == 0 or float(np.mean(inner < 100)) < 0.03:
+            return None, False
+        value = self.recognizer(inner, (10, 8, 7))
+        return (value if value is not None and value <= 30 else None), True
+
+    def _confirm(self, key: str, value: object | None) -> bool:
+        if value is None:
+            self._pending.pop(key, None)
+            return False
+        if self._committed.get(key) == value:
+            self._pending.pop(key, None)
+            return False
+        pending = self._pending.get(key)
+        count = pending[1] + 1 if pending and pending[0] == value else 1
+        if count < 2:
+            self._pending[key] = (value, count)
+            return False
+        self._committed[key] = value
+        self._pending.pop(key, None)
+        return True
+
+    def sample(self, _frame_number: int, frame: np.ndarray) -> ScoreboardReading | None:
+        if not self.enabled:
+            return None
+        if not self.locked:
+            self._try_locate_boxes(frame)
+            if not self.locked:
+                return None
+        if not self.circles_locked:
+            self._try_locate_circles(frame)
+
+        assert self.box_white is not None and self.box_yellow is not None
+        signature_box = self.panel_box or self.box_white
+        x, y, w, h = signature_box
+        signature = cv2.resize(
+            cv2.cvtColor(frame[y : y + h, x : x + w], cv2.COLOR_BGR2GRAY),
+            (64, 32),
+        )
+        self._since_ocr += 1
+        changed = self._signature is None or float(
+            np.mean(cv2.absdiff(signature, self._signature))
+        ) > 3.5
+        if not (changed or self._pending or self._since_ocr >= self.HEARTBEAT_SAMPLES):
+            return None
+        self._signature = signature
+        self._since_ocr = 0
+
+        values: dict[str, object | None] = {
+            "white_score": self._read_colored(frame, self.box_white, "white"),
+            "yellow_score": self._read_colored(frame, self.box_yellow, "yellow"),
+        }
+        if self.panel_box is not None:
+            px, py, pw, ph = self.panel_box
+            panel = frame[py : py + ph, px : px + pw]
+            set_number = self.header_recognizer(
+                self._crop(panel, PbaScoreboardReader.DIGIT_CELLS["set_number"])
+            )
+            inning = self.header_recognizer(
+                self._crop(panel, PbaScoreboardReader.DIGIT_CELLS["inning"])
+            )
+            values["set"] = set_number if set_number is not None and 0 <= set_number <= 9 else None
+            values["inning"] = inning if inning is not None and 0 <= inning <= 99 else None
+
+        active_color = None
+        active_run = None
+        if self.circles_locked:
+            assert self.circle_white is not None and self.circle_yellow is not None
+            white_run, white_has_digit = self._read_circle(frame, self.circle_white, "white")
+            yellow_run, yellow_has_digit = self._read_circle(frame, self.circle_yellow, "yellow")
+            if white_has_digit and not yellow_has_digit:
+                active_color, active_run = "white", white_run
+            elif yellow_has_digit and not white_has_digit:
+                active_color, active_run = "yellow", yellow_run
+        values["active_color"] = active_color
+        if active_color is not None:
+            values[f"{active_color}_run"] = active_run
+
+        current_set = int(self._committed.get("set", -1))
+        candidate_set = values.get("set")
+        if (
+            current_set >= 0
+            and candidate_set is not None
+            and int(candidate_set) not in (current_set, current_set + 1)
+        ):
+            values["set"] = None
+            candidate_set = None
+        set_advances = candidate_set is not None and int(candidate_set) > current_set
+        same_set = not set_advances
+        if same_set:
+            for key in ("white_score", "yellow_score", "inning"):
+                current = self._committed.get(key)
+                if current is not None and values.get(key) is not None and int(values[key]) < int(current):
+                    values[key] = None
+            current_inning = self._committed.get("inning")
+            if (
+                current_inning is not None
+                and values.get("inning") is not None
+                and int(values["inning"]) > int(current_inning) + 1
+            ):
+                values["inning"] = None
+
+        committed_changed = False
+        for key, value in values.items():
+            committed_changed = self._confirm(key, value) or committed_changed
+        if not committed_changed:
+            return None
+        required = ("set", "inning", "white_score", "yellow_score")
+        if any(key not in self._committed for key in required):
+            return None
+
+        row1_color = (
+            "white" if self.box_white[1] < self.box_yellow[1] else "yellow"
+        )
+        row2_color = "yellow" if row1_color == "white" else "white"
+        return ScoreboardReading(
+            set_number=int(self._committed["set"]),
+            inning=int(self._committed["inning"]),
+            player1_score=int(self._committed[f"{row1_color}_score"]),
+            player2_score=int(self._committed[f"{row2_color}_score"]),
+            player1_run=int(self._committed.get(f"{row1_color}_run", 0)),
+            player2_run=int(self._committed.get(f"{row2_color}_run", 0)),
+            active_color=str(self._committed.get("active_color"))
+            if "active_color" in self._committed
+            else None,
+            row1_color=row1_color,
+        )

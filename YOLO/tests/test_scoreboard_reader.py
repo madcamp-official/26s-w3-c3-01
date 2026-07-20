@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from cuecast_yolo.scoreboard_reader import (
     PbaScoreboardReader,
+    RealtimePbaScoreboardReader,
     ScoreboardReading,
     StableScoreboardState,
     SyntheticDigitRecognizer,
 )
+
+
+class _SequenceRecognizer:
+    available = True
+
+    def __init__(self, values: list[int]) -> None:
+        self.values = iter(values)
+
+    def __call__(self, _image, _modes=(8, 7, 13)) -> int:
+        return next(self.values)
 
 
 class PbaScoreboardReaderTest(unittest.TestCase):
@@ -82,6 +94,39 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         state.update(ScoreboardReading(2, 6, 5, 5, 2, 0))
         result = state.update(ScoreboardReading(2, 7, 4, 5, 0, 0))
         self.assertIsNone(result)
+
+    def test_realtime_reader_confirms_scores_and_active_cue_twice(self) -> None:
+        reader = RealtimePbaScoreboardReader(
+            _SequenceRecognizer([]),
+            _SequenceRecognizer([1, 3, 1, 3, 1, 9, 1, 9]),
+        )
+        reader.box_white = (70, 30, 11, 14)
+        reader.box_yellow = (70, 44, 11, 14)
+        reader.circle_white = (85, 30, 12, 12)
+        reader.circle_yellow = (85, 44, 12, 12)
+        reader.panel_box = (0, 0, 100, 60)
+        frame = np.full((80, 120, 3), 128, np.uint8)
+
+        def score(_frame, _box, color):
+            return 5 if color == "white" else 2
+
+        def circle(_frame, _box, color):
+            return (2, True) if color == "white" else (None, False)
+
+        with (
+            patch.object(reader, "_read_colored", side_effect=score),
+            patch.object(reader, "_read_circle", side_effect=circle),
+        ):
+            self.assertIsNone(reader.sample(1, frame))
+            result = reader.sample(2, frame)
+            self.assertIsNone(reader.sample(3, frame))
+            self.assertIsNone(reader.sample(4, frame))
+
+        self.assertEqual(
+            result,
+            ScoreboardReading(1, 3, 5, 2, 2, 0, "white", "white"),
+        )
+        self.assertEqual(reader._committed["inning"], 3)
 
 
 if __name__ == "__main__":
