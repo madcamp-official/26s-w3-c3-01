@@ -1,0 +1,4 @@
+# backend 전용 의존성 (EC2 등 서버 배포 시 이걸로 설치)
+fastapi
+uvicorn[standard]
+boto3
