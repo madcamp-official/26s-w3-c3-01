@@ -60,6 +60,7 @@ source db/db.env && venv/bin/python src/process_queue.py
 - `source db/db.env` 로 `S3_BUCKET`·`AWS_REGION` 을 불러와야 **S3까지 업로드**된다. 안 하면 로컬(`results/`)에만 저장된다.
 - 업로드가 끝나면 **10분 이내** EC2 cron이 알아서 DB에 적재한다. 여기까지가 끝.
 - **이미 추출한 영상은 자동으로 건너뛴다** — S3(또는 로컬)에 `results/<video_id>/turns.jsonl` 이 있으면 그 URL은 스킵. 같은 링크를 다시 넣어도 재다운로드·재추출을 안 한다. 강제로 다시 추출하려면 앞에 `FORCE=1` 을 붙인다.
+- **실행 이력은 `jobs/done/processed_urls.txt` 에 누적된다** — 링크마다 `시각 상태(done/skip/failed) URL` 한 줄. 작업 파일 자체도 처리 후 `jobs/done/`(실패 시 `jobs/failed/`)로 이동한다.
 - 추출 후 다운로드한 원본 영상은 자동 삭제(디스크 절약). 남기려면 앞에 `KEEP_VIDEOS=1` 을 붙인다.
 
 ### B. 파이프라인 점검 (전 구간 한 번에 확인)

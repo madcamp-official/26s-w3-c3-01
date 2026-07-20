@@ -7,6 +7,7 @@
 #
 # 재처리 방지: 이미 추출된 영상(= S3 또는 로컬 results 에 turns.jsonl 존재)은 자동으로 건너뛴다.
 # 다시 추출하고 싶으면 FORCE=1 로 실행:  FORCE=1 source db/db.env && venv/bin/python src/process_queue.py
+# 실행 이력: 처리한 모든 링크가 jobs/done/processed_urls.txt 에 누적 기록된다 (시각·상태·URL).
 import os
 import re
 import shutil
@@ -85,10 +86,11 @@ def already_processed(vid):
 
 
 def process_url(url):
+    """URL 하나 처리. 반환: 'done'(처리됨) | 'skip'(이미 처리돼 건너뜀)."""
     vid = video_id_of(url)
     if already_processed(vid):
         log(f"이미 처리된 영상 — 건너뜀: {vid}  ({url})   [재처리하려면 FORCE=1]")
-        return
+        return "skip"
     video_path = os.path.join(VIDEOS, f"{vid}.mp4")
     outdir = os.path.join(RESULTS, vid)
 
@@ -113,6 +115,15 @@ def process_url(url):
     if not KEEP_VIDEOS and os.path.exists(video_path):
         os.remove(video_path)
         log(f"원본 영상 삭제: {video_path}")
+    return "done"
+
+
+def record_ledger(url, status):
+    """실행한 링크를 누적 이력 파일(jobs/done/processed_urls.txt)에 한 줄씩 기록.
+    작업 파일(pending→done 이동)과 별개로, 언제 어떤 링크가 어떻게 끝났는지 남긴다."""
+    ledger = os.path.join(DONE, "processed_urls.txt")
+    with open(ledger, "a") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {status:6s}  {url}\n")
 
 
 def main():
@@ -141,10 +152,12 @@ def main():
                 urls = [u.strip() for u in f if u.strip() and not u.startswith("#")]
             for url in urls:
                 try:
-                    process_url(url)
+                    status = process_url(url)
                 except Exception as e:
                     ok = False
+                    status = "failed"
                     log(f"실패: {url} — {e}")
+                record_ledger(url, status)
             shutil.move(run, os.path.join(DONE if ok else FAILED, job))
             log(f"작업 {job} → {'done' if ok else 'failed'}")
     finally:
