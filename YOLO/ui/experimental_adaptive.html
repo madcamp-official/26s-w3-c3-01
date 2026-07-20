@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CueCast Experimental Adaptive Grid</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --text: #172027;
+      --muted: #65727c;
+      --border: #d8dee3;
+      --felt: #176b51;
+      --felt-line: rgba(255,255,255,.35);
+      --cue: #43a6ff;
+      --o1: #ffb347;
+      --o2: #ff6262;
+      --accent: #2f7df4;
+      --shadow: 0 14px 40px rgba(22,35,45,.12);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101417;
+        --panel: #182027;
+        --text: #eef4f7;
+        --muted: #aab7c0;
+        --border: #34414a;
+        --felt: #135a45;
+        --shadow: 0 14px 40px rgba(0,0,0,.32);
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, Pretendard, system-ui, sans-serif; }
+    button, select, input { font: inherit; }
+    main { width: min(1180px, calc(100% - 32px)); margin: 28px auto 48px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(22px, 3vw, 34px); font-weight: 700; letter-spacing: -.04em; }
+    header p { margin: 7px 0 0; color: var(--muted); }
+    .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #d44; }
+    .dot.ok { background: #42bf79; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 18px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); }
+    .board-panel { padding: 16px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
+    select, input[type=number] { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--text); padding: 7px 10px; }
+    button { min-height: 38px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--text); padding: 7px 12px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button.active { background: var(--accent); border-color: var(--accent); color: white; }
+    .role-picker { display: flex; gap: 6px; }
+    .role-picker button { font-weight: 700; min-width: 54px; }
+    .board-wrap { position: relative; }
+    canvas { display: block; width: 100%; aspect-ratio: 2 / 1; border-radius: 13px; touch-action: none; cursor: crosshair; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 11px; color: var(--muted); font-size: 13px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 10px; height: 10px; border-radius: 50%; }
+    .swatch.cue { background: var(--cue); }
+    .swatch.o1 { background: var(--o1); }
+    .swatch.o2 { background: var(--o2); }
+    .sidebar { display: grid; gap: 14px; align-content: start; }
+    .result { padding: 18px; }
+    .result-label { color: var(--muted); font-size: 13px; }
+    .probability { margin: 4px 0 12px; font-size: 46px; line-height: 1; letter-spacing: -.05em; font-weight: 750; }
+    .meter { height: 9px; border-radius: 999px; background: var(--border); overflow: hidden; }
+    .meter > div { height: 100%; width: 0; background: var(--accent); transition: width .2s ease; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+    .metric strong { display: block; margin-top: 3px; font-size: 17px; }
+    .details { padding: 16px; }
+    .details h2 { margin: 0 0 12px; font-size: 15px; }
+    .kv { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; font-size: 13px; }
+    .kv span:nth-child(odd) { color: var(--muted); }
+    .coordinates { padding: 16px; }
+    .coordinates h2 { margin: 0 0 11px; font-size: 15px; }
+    .coord-row { display: grid; grid-template-columns: 38px 1fr 1fr; gap: 7px; align-items: end; margin-top: 8px; }
+    .coord-name { font-weight: 700; padding-bottom: 10px; }
+    .coord-row input { width: 100%; }
+    .notice { margin-top: 16px; padding: 13px 15px; border-left: 3px solid var(--accent); color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .error { color: #e25454; }
+    @media (max-width: 850px) {
+      .workspace { grid-template-columns: 1fr; }
+      .sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .coordinates { grid-column: 1 / -1; }
+    }
+    @media (max-width: 560px) {
+      main { width: min(100% - 18px, 1180px); margin-top: 16px; }
+      header { align-items: start; flex-direction: column; }
+      .sidebar { grid-template-columns: 1fr; }
+      .coordinates { grid-column: auto; }
+      .toolbar > label { flex: 1 1 140px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Experimental Adaptive Grid</h1>
+      <p>임의의 세 공을 배치하고 실제 Hybrid 확률과 활성 Grid 분할을 확인합니다.</p>
+    </div>
+    <div class="status"><span class="dot" id="health-dot"></span><span id="health-text">엔진 연결 중</span></div>
+  </header>
+
+  <div class="workspace">
+    <section class="panel board-panel">
+      <div class="toolbar">
+        <div>
+          <label>배치할 공</label>
+          <div class="role-picker" id="role-picker">
+            <button type="button" class="active" data-role="cue">C</button>
+            <button type="button" data-role="object1">O1</button>
+            <button type="button" data-role="object2">O2</button>
+          </div>
+        </div>
+        <label>수구 색상
+          <select id="shooter">
+            <option value="yellow">노란 수구</option>
+            <option value="white">흰 수구</option>
+          </select>
+        </label>
+        <label>Grid 표시
+          <select id="grid-mode">
+            <option value="adaptive">실제 Adaptive</option>
+            <option value="0">Level 0 · 4×2</option>
+            <option value="1">Level 1 · 8×4</option>
+            <option value="2">Level 2 · 16×8</option>
+          </select>
+        </label>
+        <label>과거 위치
+          <select id="history-mode">
+            <option value="all">전체 1,509점</option>
+            <option value="success">성공 타구만</option>
+            <option value="failure">실패 타구만</option>
+            <option value="none">숨기기</option>
+          </select>
+        </label>
+        <button type="button" id="load-split">활성 분할 예시</button>
+      </div>
+
+      <div class="board-wrap">
+        <canvas id="board" aria-label="세 공을 클릭하거나 드래그하여 배치하는 버츄얼 당구대"></canvas>
+      </div>
+      <div class="legend">
+        <span><i class="swatch cue"></i>수구 C</span>
+        <span><i class="swatch o1"></i>목적구 O1</span>
+        <span><i class="swatch o2"></i>목적구 O2</span>
+        <span>당구대를 클릭하면 선택한 공이 이동합니다. 공을 직접 드래그할 수도 있습니다.</span>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel result" aria-live="polite">
+        <div class="result-label">보정된 Hybrid 성공률</div>
+        <div class="probability" id="probability">—</div>
+        <div class="meter"><div id="meter"></div></div>
+        <div class="metrics">
+          <div class="metric"><span class="result-label">신뢰도</span><strong id="confidence">—</strong></div>
+          <div class="metric"><span class="result-label">표준편차</span><strong id="uncertainty">—</strong></div>
+        </div>
+      </section>
+
+      <section class="panel details">
+        <h2>Adaptive 상태</h2>
+        <div class="kv">
+          <span>선택 Level</span><strong id="selected-level">—</strong>
+          <span>stateKey</span><strong id="state-key">—</strong>
+          <span>Grid 표본</span><strong id="grid-samples">—</strong>
+          <span>유사 포메이션</span><strong id="neighbors">—</strong>
+          <span>활성 분할</span><strong id="split-count">—</strong>
+          <span>데이터</span><strong id="records">—</strong>
+        </div>
+      </section>
+
+      <section class="panel coordinates">
+        <h2>정규화 좌표</h2>
+        <div id="coordinate-inputs"></div>
+      </section>
+    </aside>
+  </div>
+
+  <div class="notice" id="validation-note">검증 정보 로딩 중</div>
+</main>
+
+<script>
+(() => {
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const rootStyle = getComputedStyle(document.documentElement);
+  const roles = ['cue', 'object1', 'object2'];
+  const labels = { cue: 'C', object1: 'O1', object2: 'O2' };
+  const roleColors = { cue: '--cue', object1: '--o1', object2: '--o2' };
+  const levelDimensions = [[4, 2], [8, 4], [16, 8]];
+  const state = {
+    activeRole: 'cue',
+    dragging: null,
+    formation: { cue: [0.24, 0.52], object1: [0.54, 0.30], object2: [0.73, 0.70] },
+    data: null,
+    prediction: null,
+    request: 0
+  };
+
+  const color = (name) => rootStyle.getPropertyValue(name).trim();
+  const clamp = (value) => Math.max(0, Math.min(1, value));
+  const cell = (point, level) => {
+    const [cols, rows] = levelDimensions[level];
+    const col = Math.min(cols - 1, Math.floor(point[0] * cols));
+    const row = Math.min(rows - 1, Math.floor(point[1] * rows));
+    return { col, row, id: row * cols + col };
+  };
+
+  function setupCoordinateInputs() {
+    const host = document.getElementById('coordinate-inputs');
+    roles.forEach((role) => {
+      const row = document.createElement('div');
+      row.className = 'coord-row';
+      row.innerHTML = `<div class="coord-name">${labels[role]}</div>
+        <label>X<input type="number" min="0" max="1" step="0.001" data-role="${role}" data-axis="0"></label>
+        <label>Y<input type="number" min="0" max="1" step="0.001" data-role="${role}" data-axis="1"></label>`;
+      host.append(row);
+    });
+    host.addEventListener('change', (event) => {
+      const input = event.target.closest('input');
+      if (!input) return;
+      state.formation[input.dataset.role][Number(input.dataset.axis)] = clamp(Number(input.value));
+      draw();
+      predict();
+    });
+    syncInputs();
+  }
+
+  function syncInputs() {
+    document.querySelectorAll('#coordinate-inputs input').forEach((input) => {
+      input.value = state.formation[input.dataset.role][Number(input.dataset.axis)].toFixed(3);
+    });
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(320, rect.width);
+    const height = width / 2;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function drawGrid(cols, rows, alpha = 1) {
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color('--felt-line');
+    ctx.lineWidth = 1;
+    for (let col = 1; col < cols; col += 1) {
+      ctx.beginPath(); ctx.moveTo(col * width / cols, 0); ctx.lineTo(col * width / cols, height); ctx.stroke();
+    }
+    for (let row = 1; row < rows; row += 1) {
+      ctx.beginPath(); ctx.moveTo(0, row * height / rows); ctx.lineTo(width, row * height / rows); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawAdaptiveSubcells() {
+    if (!state.prediction) return;
+    const selectedLevel = Number(state.prediction.components.gridLevel || 0);
+    if (selectedLevel < 1) return;
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    for (let level = 1; level <= selectedLevel; level += 1) {
+      roles.forEach((role) => {
+        const parent = cell(state.formation[role], level - 1);
+        const [parentCols, parentRows] = levelDimensions[level - 1];
+        const left = parent.col * width / parentCols;
+        const top = parent.row * height / parentRows;
+        const cellWidth = width / parentCols;
+        const cellHeight = height / parentRows;
+        ctx.save();
+        ctx.strokeStyle = color(roleColors[role]);
+        ctx.lineWidth = 2;
+        ctx.setLineDash(level === 1 ? [5, 4] : [2, 3]);
+        ctx.beginPath(); ctx.moveTo(left + cellWidth / 2, top); ctx.lineTo(left + cellWidth / 2, top + cellHeight); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(left, top + cellHeight / 2); ctx.lineTo(left + cellWidth, top + cellHeight / 2); ctx.stroke();
+        ctx.restore();
+      });
+    }
+  }
+
+  function drawHistoricalPoints() {
+    const mode = document.getElementById('history-mode').value;
+    if (!state.data || mode === 'none') return;
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    ctx.save();
+    state.data.shots.forEach((shot) => {
+      if (mode === 'success' && !shot.success) return;
+      if (mode === 'failure' && shot.success) return;
+      roles.forEach((role) => {
+        const point = shot[role];
+        ctx.globalAlpha = shot.success ? .20 : .32;
+        ctx.fillStyle = shot.success ? color(roleColors[role]) : color('--panel');
+        ctx.strokeStyle = color(roleColors[role]);
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(point[0] * width, point[1] * height, 2.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      });
+    });
+    ctx.restore();
+  }
+
+  function drawActiveCells() {
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    const mode = document.getElementById('grid-mode').value;
+    const level = mode === 'adaptive' && state.prediction ? Number(state.prediction.components.gridLevel) : Number(mode === 'adaptive' ? 0 : mode);
+    const [cols, rows] = levelDimensions[level];
+    roles.forEach((role) => {
+      const current = cell(state.formation[role], level);
+      ctx.save();
+      ctx.strokeStyle = color(roleColors[role]);
+      ctx.lineWidth = 3;
+      ctx.strokeRect(current.col * width / cols + 2, current.row * height / rows + 2, width / cols - 4, height / rows - 4);
+      ctx.restore();
+    });
+  }
+
+  function drawBalls() {
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    roles.forEach((role) => {
+      const [x, y] = state.formation[role];
+      ctx.save();
+      ctx.fillStyle = color('--panel');
+      ctx.strokeStyle = color(roleColors[role]);
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(x * width, y * height, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = color('--text');
+      ctx.font = '700 11px system-ui';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(labels[role], x * width, y * height + .5);
+      ctx.restore();
+    });
+  }
+
+  function draw() {
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    if (!width) return;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = color('--felt');
+    ctx.fillRect(0, 0, width, height);
+    drawHistoricalPoints();
+    const mode = document.getElementById('grid-mode').value;
+    const level = mode === 'adaptive' ? 0 : Number(mode);
+    drawGrid(...levelDimensions[level], level === 2 ? .55 : .9);
+    if (mode === 'adaptive') drawAdaptiveSubcells();
+    drawActiveCells();
+    drawBalls();
+  }
+
+  function pointerPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+    return [clamp((event.clientX - rect.left) / rect.width), clamp((event.clientY - rect.top) / rect.height)];
+  }
+
+  function nearestRole(point) {
+    const width = canvas.clientWidth;
+    const height = width / 2;
+    let nearest = null;
+    let distance = 18;
+    roles.forEach((role) => {
+      const dx = (state.formation[role][0] - point[0]) * width;
+      const dy = (state.formation[role][1] - point[1]) * height;
+      const current = Math.hypot(dx, dy);
+      if (current < distance) { nearest = role; distance = current; }
+    });
+    return nearest;
+  }
+
+  async function predict() {
+    const request = ++state.request;
+    document.getElementById('probability').textContent = '…';
+    try {
+      const response = await fetch('/api/v1/shot-probability', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shooter: document.getElementById('shooter').value,
+          formation: state.formation,
+          position_error_mm: 25
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || '예측 실패');
+      if (request !== state.request) return;
+      state.prediction = result;
+      renderPrediction();
+      draw();
+    } catch (error) {
+      document.getElementById('probability').textContent = '오류';
+      document.getElementById('health-text').textContent = error.message;
+      document.getElementById('health-text').classList.add('error');
+    }
+  }
+
+  function renderPrediction() {
+    const result = state.prediction;
+    const probability = Number(result.successProbability) * 100;
+    const confidenceNames = { high: '높음', medium: '보통', low: '낮음' };
+    document.getElementById('probability').textContent = `${probability.toFixed(1)}%`;
+    document.getElementById('meter').style.width = `${probability}%`;
+    document.getElementById('confidence').textContent = `${confidenceNames[result.confidence.level] || result.confidence.level} · ${(result.confidence.score * 100).toFixed(0)}`;
+    document.getElementById('uncertainty').textContent = `±${(result.uncertainty.standardDeviation * 100).toFixed(1)}%p`;
+    document.getElementById('selected-level').textContent = `Level ${result.components.gridLevel}`;
+    document.getElementById('state-key').textContent = `(${result.components.gridStateKey.join(', ')})`;
+    document.getElementById('grid-samples').textContent = `${result.components.gridSamples}건`;
+    document.getElementById('neighbors').textContent = `${result.components.neighborRawSamples}건`;
+  }
+
+  async function initialize() {
+    setupCoordinateInputs();
+    const [healthResponse, dataResponse] = await Promise.all([fetch('/api/v1/health'), fetch('/api/v1/data')]);
+    if (!healthResponse.ok || !dataResponse.ok) throw new Error('실험 엔진 초기화 실패');
+    const health = await healthResponse.json();
+    state.data = await dataResponse.json();
+    document.getElementById('health-dot').classList.add('ok');
+    document.getElementById('health-text').textContent = '실험 엔진 연결됨';
+    document.getElementById('records').textContent = `${health.records}건`;
+    const l1Splits = health.grid.splitWorthyParents[0].length;
+    const l2Splits = health.grid.splitWorthyParents[1].length;
+    document.getElementById('split-count').textContent = `L1 ${l1Splits}개/${health.grid.selectedLevelCounts['1']}건 · L2 ${l2Splits}개/${health.grid.selectedLevelCounts['2']}건`;
+    document.getElementById('validation-note').textContent = `기존 엔진은 보존되어 있습니다. 실험판: Root 4×2, 부모 3건·자식 1건부터 분할, 강한 Grid prior, 32회 좌표 Monte Carlo, 경기 단위 홀드아웃 Log Loss ${health.validation.logLoss.toFixed(3)} · Brier ${health.validation.brierScore.toFixed(3)}.`;
+    document.getElementById('load-split').disabled = !state.data.splitExamples.length;
+    draw();
+    await predict();
+  }
+
+  document.getElementById('role-picker').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-role]');
+    if (!button) return;
+    state.activeRole = button.dataset.role;
+    document.querySelectorAll('#role-picker button').forEach((item) => item.classList.toggle('active', item === button));
+  });
+  canvas.addEventListener('pointerdown', (event) => {
+    const point = pointerPosition(event);
+    state.dragging = nearestRole(point);
+    if (!state.dragging) {
+      state.formation[state.activeRole] = point;
+      syncInputs(); draw(); predict();
+    } else {
+      canvas.setPointerCapture(event.pointerId);
+    }
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!state.dragging) return;
+    state.formation[state.dragging] = pointerPosition(event);
+    syncInputs(); draw();
+  });
+  canvas.addEventListener('pointerup', () => {
+    if (!state.dragging) return;
+    state.dragging = null;
+    predict();
+  });
+  canvas.addEventListener('pointercancel', () => { state.dragging = null; });
+  document.getElementById('grid-mode').addEventListener('change', draw);
+  document.getElementById('history-mode').addEventListener('change', draw);
+  document.getElementById('shooter').addEventListener('change', predict);
+  document.getElementById('load-split').addEventListener('click', () => {
+    const example = state.data?.splitExamples?.[0];
+    if (!example) return;
+    state.formation = {
+      cue: [...example.formation.cue], object1: [...example.formation.object1], object2: [...example.formation.object2]
+    };
+    document.getElementById('shooter').value = example.shooter;
+    document.getElementById('grid-mode').value = 'adaptive';
+    syncInputs(); draw(); predict();
+  });
+  window.addEventListener('resize', resize);
+  resize();
+  initialize().catch((error) => {
+    document.getElementById('health-text').textContent = error.message;
+    document.getElementById('health-text').classList.add('error');
+  });
+})();
+</script>
+</body>
+</html>

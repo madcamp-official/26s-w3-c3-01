@@ -112,6 +112,30 @@ class ShotRecordTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertFalse(records[0].success)
 
+    def test_db_export_pos_keys_and_top_level_coverage(self) -> None:
+        db_row = {
+            "video_id": "export",
+            "turn": 1,
+            "epoch": 0,
+            "shooter": "white",
+            "before_pos": {
+                "white": [0.25, 0.50],
+                "yellow": [0.50, 0.75],
+                "red": [0.75, 0.25],
+            },
+            "after_pos": {
+                "white": [0.30, 0.50],
+                "yellow": [0.55, 0.70],
+                "red": [0.70, 0.30],
+            },
+            "success": True,
+            "coverage": 0.87,
+        }
+        restored = ShotRecord.from_db_dict(db_row)
+        self.assertEqual(restored.before.cue, PointMm(710.0, 710.0))
+        self.assertIsNotNone(restored.after)
+        self.assertAlmostEqual(restored.detection_confidence, 0.87)
+
     def test_layout_roles_are_deterministic(self) -> None:
         converted, roles = layout_from_normalized_colors(
             {"white": [0.1, 0.2], "yellow": [0.3, 0.4], "red": [0.5, 0.6]},

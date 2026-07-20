@@ -102,17 +102,22 @@ class ShotRecord:
     def from_db_dict(cls, value: dict[str, object]) -> "ShotRecord":
         """Read the newline-delimited DB record used by ``data``."""
         shooter = str(value["shooter"])
+        before_value = value.get("before", value.get("before_pos"))
+        if not isinstance(before_value, dict):
+            raise ValueError("DB shot record requires before or before_pos coordinates")
         before, _ = layout_from_normalized_colors(
-            value["before"], shooter  # type: ignore[arg-type]
+            before_value, shooter
         )
-        after_value = value.get("after")
+        after_value = value.get("after", value.get("after_pos"))
         after = (
             layout_from_normalized_colors(after_value, shooter)[0]  # type: ignore[arg-type]
             if isinstance(after_value, dict)
             else None
         )
         detail = value.get("success_detail") or {}
-        coverage = float(detail.get("coverage", 1.0))  # type: ignore[union-attr]
+        coverage = float(
+            detail.get("coverage", value.get("coverage", 1.0))  # type: ignore[union-attr]
+        )
         shot_id = (
             f"{value['video_id']}:turn:{int(value['turn'])}:epoch:{int(value['epoch'])}"
         )
