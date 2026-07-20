@@ -26,7 +26,7 @@ def layout_from_roles(value: dict[str, object]) -> LayoutMm:
         x, y = float(raw[0]), float(raw[1])
         if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
             raise ValueError(f"{role} 좌표는 0~1 범위여야 합니다")
-        points.append(PointMm(x * 2840.0, y * 1420.0))
+        points.append(PointMm(x * 2844.0, y * 1422.0))
     return LayoutMm(*points)
 
 
@@ -82,9 +82,9 @@ class SymmetricProbabilityService:
     def _normalized_roles(record: object) -> dict[str, list[float]]:
         layout = record.before  # type: ignore[attr-defined]
         return {
-            "cue": [layout.cue.x_mm / 2840.0, layout.cue.y_mm / 1420.0],
-            "object1": [layout.object1.x_mm / 2840.0, layout.object1.y_mm / 1420.0],
-            "object2": [layout.object2.x_mm / 2840.0, layout.object2.y_mm / 1420.0],
+            "cue": [layout.cue.x_mm / 2844.0, layout.cue.y_mm / 1422.0],
+            "object1": [layout.object1.x_mm / 2844.0, layout.object1.y_mm / 1422.0],
+            "object2": [layout.object2.x_mm / 2844.0, layout.object2.y_mm / 1422.0],
         }
 
     def data(self) -> dict[str, object]:

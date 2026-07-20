@@ -10,8 +10,8 @@ from typing import Protocol, Sequence
 import numpy as np
 
 
-TABLE_WIDTH_MM = 2840.0
-TABLE_HEIGHT_MM = 1420.0
+TABLE_WIDTH_MM = 2844.0
+TABLE_HEIGHT_MM = 1422.0
 BALL_COLORS = ("white", "yellow", "red")
 
 

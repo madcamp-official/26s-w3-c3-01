@@ -9,12 +9,14 @@ import cv2
 
 from .detector import BALL_NAMES
 from .precut import PreCutLayoutBuffer
+from .scoreboard_reader import PbaScoreboardReader, StableScoreboardState
 from .stop_detector import BallStopDetector
 from .video_position_analyzer import VideoPositionAnalyzer
 
 
 Layout = dict[str, tuple[float, float]]
 LayoutCallback = Callable[[Layout, str, dict[str, object]], None]
+ScoreboardCallback = Callable[[dict[str, object]], None]
 
 
 def layout_distance(first: Layout, second: Layout) -> float:
@@ -35,15 +37,20 @@ class YoutubeLiveWorker:
         analyzer: VideoPositionAnalyzer,
         callback: LayoutCallback,
         *,
-        sample_fps: float = 5.0,
+        sample_fps: float = 10.0,
+        scoreboard_reader: PbaScoreboardReader | None = None,
+        scoreboard_callback: ScoreboardCallback | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.callback = callback
         self.sample_fps = sample_fps
+        self.scoreboard_reader = scoreboard_reader or PbaScoreboardReader()
+        self.scoreboard_callback = scoreboard_callback
         self._lock = Lock()
         self._thread: Thread | None = None
         self._stop = Event()
         self._shooter = "white"
+        self._pending_sync_seconds: float | None = None
         self._status: dict[str, object] = {
             "running": False,
             "state": "idle",
@@ -56,6 +63,7 @@ class YoutubeLiveWorker:
         with self._lock:
             self._stop = stop_event
             self._shooter = shooter
+            self._pending_sync_seconds = None
             self._status = {
                 "running": True,
                 "state": "connecting",
@@ -63,6 +71,8 @@ class YoutubeLiveWorker:
                 "positionSeconds": max(0.0, start_seconds),
                 "layouts": 0,
                 "completeFrames": 0,
+                "scoreboardDetected": False,
+                "scoreboard": None,
                 "lastError": None,
             }
             self._thread = Thread(
@@ -93,6 +103,22 @@ class YoutubeLiveWorker:
         with self._lock:
             self._shooter = shooter
 
+    def sync_to(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("동기화 시간은 0 이상이어야 합니다")
+        with self._lock:
+            if not self._status.get("running"):
+                raise ValueError("실시간 분석이 실행 중이 아닙니다")
+            self._pending_sync_seconds = float(seconds)
+            self._status["syncing"] = True
+            self._status["requestedSyncSeconds"] = float(seconds)
+
+    def _take_pending_sync(self) -> float | None:
+        with self._lock:
+            seconds = self._pending_sync_seconds
+            self._pending_sync_seconds = None
+            return seconds
+
     def status(self) -> dict[str, object]:
         with self._lock:
             return dict(self._status)
@@ -108,15 +134,23 @@ class YoutubeLiveWorker:
         timestamp: float,
         source: str,
         confidence: float,
+        state: str,
+        confirmed: bool,
+        confidences: dict[str, float] | None = None,
     ) -> None:
         with self._lock:
             shooter = self._shooter
-            layout_count = int(self._status.get("layouts", 0)) + 1
+            layout_count = int(self._status.get("layouts", 0)) + int(confirmed)
             self._status.update(
                 layouts=layout_count,
-                lastLayoutSeconds=timestamp,
-                lastLayoutSource=source,
+                trackingState=state,
+                lastPreviewSeconds=timestamp,
             )
+            if confirmed:
+                self._status.update(
+                    lastLayoutSeconds=timestamp,
+                    lastLayoutSource=source,
+                )
         self.callback(
             positions,
             shooter,
@@ -125,6 +159,9 @@ class YoutubeLiveWorker:
                 "detectedAtSeconds": timestamp,
                 "layoutSource": source,
                 "detectionConfidence": confidence,
+                "ballConfidences": confidences or {},
+                "trackingState": state,
+                "confirmed": confirmed,
             },
         )
 
@@ -140,77 +177,148 @@ class YoutubeLiveWorker:
             frame_number = max(0, round(start_seconds * fps))
             capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
             stop_detector = BallStopDetector(
-                stable_seconds=0.7,
-                stop_threshold=0.008,
-                move_threshold=0.025,
+                stable_seconds=0.4,
+                stop_threshold=0.004,
+                move_threshold=0.015,
             )
-            precut = PreCutLayoutBuffer(
-                buffer_seconds=0.9,
-                sample_count=3,
-                max_step=0.025,
-                max_span=0.05,
-                max_cut_gap=0.45,
+            precut_buffer = PreCutLayoutBuffer(
+                buffer_seconds=0.6,
+                sample_count=1,
+                max_step=0.02,
+                max_span=0.04,
+                max_cut_gap=0.2,
             )
-            previous_complete = False
-            last_confidence = 0.0
-            last_published: Layout | None = None
+            scoreboard_state = StableScoreboardState(confirmations=3)
+            last_scoreboard_sample = -1.0
+            previous_top_view = False
+            last_published_positions: Layout | None = None
+            last_complete_confidences: dict[str, float] = {}
+            self.analyzer.reset_tracking()
             complete_frames = 0
             self._update(
                 state="running",
                 title=video.title,
                 durationSeconds=video.duration_seconds,
+                detectorMode="minsu_first_top_view_fixed_yolo_stopped_and_precut",
             )
 
             while not stop_event.is_set():
                 cycle_started = monotonic()
+                sync_seconds = self._take_pending_sync()
+                if sync_seconds is not None:
+                    frame_number = max(0, round(sync_seconds * fps))
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                    stop_detector.reset()
+                    precut_buffer.clear()
+                    scoreboard_state = StableScoreboardState(confirmations=3)
+                    last_scoreboard_sample = -1.0
+                    previous_top_view = False
+                    last_published_positions = None
+                    last_complete_confidences = {}
+                    complete_frames = 0
+                    self._update(
+                        syncing=False,
+                        lastSyncedSeconds=sync_seconds,
+                        positionSeconds=sync_seconds,
+                        completeFrames=0,
+                        trackingState="syncing",
+                    )
                 ok, frame = capture.read()
                 if not ok:
                     self._update(running=False, state="ended")
                     return
                 timestamp = frame_number / fps
-                detected = self.analyzer.detect_frame(frame)
-                positions: Layout = {}
-                if detected is not None:
-                    positions, last_confidence = detected
-                    complete_frames += 1
-                    precut.add(timestamp, positions)
-                elif previous_complete:
-                    layout = precut.finalize_on_cut(timestamp)
-                    if layout is not None and (
-                        last_published is None
-                        or layout_distance(layout.positions, last_published) > 0.012
-                    ):
-                        self._publish(
-                            layout.positions,
-                            timestamp=layout.timestamp,
-                            source="pre_cut",
-                            confidence=last_confidence,
-                        )
-                        last_published = layout.positions
-
-                stop_layout = stop_detector.update(timestamp, positions)
-                if stop_layout is not None and (
-                    last_published is None
-                    or layout_distance(stop_layout.positions, last_published) > 0.012
-                ):
-                    self._publish(
-                        stop_layout.positions,
-                        timestamp=stop_layout.timestamp,
-                        source="stopped",
-                        confidence=last_confidence,
+                if timestamp - last_scoreboard_sample >= 0.25:
+                    last_scoreboard_sample = timestamp
+                    confirmed_scoreboard = scoreboard_state.update(
+                        self.scoreboard_reader.read(frame)
                     )
-                    last_published = stop_layout.positions
-
-                previous_complete = detected is not None
-                for _ in range(step - 1):
+                    if confirmed_scoreboard is not None:
+                        scoreboard = {
+                            **confirmed_scoreboard.to_dict(),
+                            "detectedAtSeconds": timestamp,
+                        }
+                        self._update(
+                            scoreboardDetected=True,
+                            scoreboard=scoreboard,
+                            lastScoreboardSeconds=timestamp,
+                        )
+                        if self.scoreboard_callback is not None:
+                            self.scoreboard_callback(scoreboard)
+                # 5e0cabe pipeline: acquire the table corners once from the first
+                # plausible top view, validate that reference on every frame, and
+                # use best_3cls.pt YOLO detections for the ball coordinates.
+                detected = self.analyzer.detect_tracking_frame(frame)
+                complete = all(name in detected.positions for name in BALL_NAMES)
+                if complete:
+                    complete_frames += 1
+                    precut_buffer.add(timestamp, detected.positions)
+                    last_complete_confidences = dict(detected.confidences)
+                stop = stop_detector.update(
+                    timestamp, detected.positions if detected.valid_view else {}
+                )
+                confidence = (
+                    sum(detected.confidences.values()) / len(detected.confidences)
+                    if detected.confidences
+                    else 0.0
+                )
+                tracking_state = (
+                    "confirmed"
+                    if stop is not None
+                    else "settling"
+                    if complete
+                    else "camera_cut"
+                    if not detected.valid_view
+                    else "missing"
+                )
+                if previous_top_view and not detected.valid_view:
+                    pre_cut = precut_buffer.finalize_on_cut(timestamp)
+                    if pre_cut is not None and (
+                        last_published_positions is None
+                        or layout_distance(
+                            pre_cut.positions, last_published_positions
+                        ) > 0.05
+                    ):
+                        pre_cut_confidence = (
+                            sum(last_complete_confidences.values())
+                            / len(last_complete_confidences)
+                            if last_complete_confidences
+                            else 0.0
+                        )
+                        self._publish(
+                            pre_cut.positions,
+                            timestamp=pre_cut.timestamp,
+                            source="pre_cut",
+                            confidence=pre_cut_confidence,
+                            confidences=last_complete_confidences,
+                            state="camera_cut",
+                            confirmed=True,
+                        )
+                        last_published_positions = pre_cut.positions
+                if stop is not None:
+                    self._publish(
+                        stop.positions,
+                        timestamp=timestamp,
+                        source="stopped",
+                        confidence=confidence,
+                        confidences=detected.confidences,
+                        state="confirmed",
+                        confirmed=True,
+                    )
+                    last_published_positions = stop.positions
+                previous_top_view = detected.valid_view
+                processing_seconds = monotonic() - cycle_started
+                advance = max(step, round(processing_seconds * fps))
+                for _ in range(advance - 1):
                     if stop_event.is_set() or not capture.grab():
                         break
-                frame_number += step
+                frame_number += advance
                 self._update(
                     positionSeconds=timestamp,
                     completeFrames=complete_frames,
+                    trackingState=tracking_state,
                 )
-                remaining = (step / fps) - (monotonic() - cycle_started)
+                remaining = (advance / fps) - (monotonic() - cycle_started)
                 if remaining > 0:
                     sleep(min(remaining, 0.25))
         except Exception as error:

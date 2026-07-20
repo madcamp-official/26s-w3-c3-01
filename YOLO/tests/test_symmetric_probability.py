@@ -8,6 +8,7 @@ from cuecast_yolo.shot_probability import (
     NeighborConfig,
     PointMm,
     ShotRecord,
+    TABLE_WIDTH_MM,
 )
 from cuecast_yolo.symmetric_probability import (
     CanonicalAdaptiveGridIndex,
@@ -44,7 +45,7 @@ class FakeBaseModel:
 
     def predict_probability(self, value: LayoutMm, _cue_ball: str) -> float:
         points = value.as_array()
-        return float(0.2 + 0.6 * points[0, 0] / 2840.0)
+        return float(0.2 + 0.6 * points[0, 0] / TABLE_WIDTH_MM)
 
 
 class SymmetryTransformTest(unittest.TestCase):
