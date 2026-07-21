@@ -74,6 +74,42 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         callback.assert_called_once()
         layout_callback.assert_not_called()
 
+    def test_scoreboard_confirm_republishes_last_confirmed_layout(self) -> None:
+        layout_callback = MagicMock()
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), layout_callback)
+        # 공이 멈춰 레이아웃이 먼저 확정되었지만 아직 수구는 미확정 상태.
+        worker._publish(
+            POSITIONS,
+            timestamp=10.0,
+            source="stopped",
+            confidence=0.9,
+            confidences={name: 0.9 for name in POSITIONS},
+            state="confirmed",
+            confirmed=True,
+        )
+        first_analysis = layout_callback.call_args.args[2]
+        self.assertFalse(first_analysis["shooterConfirmed"])
+        layout_callback.reset_mock()
+
+        # 점수판이 원형 안 숫자 색으로 수구를 확정하는 순간 즉시 재예측되어야 한다.
+        reading = ScoreboardReading(1, 2, 3, 4, 0, 1, "yellow", "white")
+        worker._accept_scoreboard(reading, 12.5)
+
+        layout_callback.assert_called_once()
+        positions, shooter, analysis = layout_callback.call_args.args
+        self.assertEqual(shooter, "yellow")
+        self.assertTrue(analysis["shooterConfirmed"])
+        self.assertTrue(analysis["confirmed"])
+        self.assertTrue(analysis["shooterRefresh"])
+
+    def test_scoreboard_confirm_without_prior_layout_does_not_republish(self) -> None:
+        layout_callback = MagicMock()
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), layout_callback)
+        worker._accept_scoreboard(
+            ScoreboardReading(1, 2, 3, 4, 0, 1, "yellow", "white"), 12.5
+        )
+        layout_callback.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

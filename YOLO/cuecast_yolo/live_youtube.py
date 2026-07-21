@@ -52,6 +52,7 @@ class YoutubeLiveWorker:
         self._stop = Event()
         self._shooter = "white"
         self._shooter_confirmed = False
+        self._last_confirmed: dict[str, object] | None = None
         self._pending_sync_seconds: float | None = None
         self._status: dict[str, object] = {
             "running": False,
@@ -66,6 +67,7 @@ class YoutubeLiveWorker:
             self._stop = stop_event
             self._shooter = shooter
             self._shooter_confirmed = False
+            self._last_confirmed = None
             self._pending_sync_seconds = None
             self._status = {
                 "running": True,
@@ -141,8 +143,11 @@ class YoutubeLiveWorker:
             "detectedAtSeconds": timestamp,
         }
         active_color = reading.active_color
+        shooter_changed = False
         with self._lock:
             if active_color in ("white", "yellow"):
+                if not self._shooter_confirmed or self._shooter != active_color:
+                    shooter_changed = True
                 self._shooter = active_color
                 self._shooter_confirmed = True
             self._status.update(
@@ -154,6 +159,10 @@ class YoutubeLiveWorker:
             )
         if self.scoreboard_callback is not None:
             self.scoreboard_callback(scoreboard)
+        # 점수판(원형 안 숫자 색)으로 수구가 확정/변경된 순간, 마지막 확정
+        # 레이아웃이 있으면 다음 정지를 기다리지 않고 곧바로 확률을 갱신한다.
+        if shooter_changed:
+            self._republish_last_confirmed()
 
     def _publish(
         self,
@@ -166,6 +175,15 @@ class YoutubeLiveWorker:
         confirmed: bool,
         confidences: dict[str, float] | None = None,
     ) -> None:
+        analysis = {
+            "mode": "live",
+            "detectedAtSeconds": timestamp,
+            "layoutSource": source,
+            "detectionConfidence": confidence,
+            "ballConfidences": confidences or {},
+            "trackingState": state,
+            "confirmed": confirmed,
+        }
         with self._lock:
             shooter = self._shooter
             shooter_confirmed = self._shooter_confirmed
@@ -180,20 +198,27 @@ class YoutubeLiveWorker:
                     lastLayoutSeconds=timestamp,
                     lastLayoutSource=source,
                 )
-        self.callback(
-            positions,
-            shooter,
-            {
-                "mode": "live",
-                "detectedAtSeconds": timestamp,
-                "layoutSource": source,
-                "detectionConfidence": confidence,
-                "ballConfidences": confidences or {},
-                "trackingState": state,
-                "confirmed": confirmed,
-                "shooterConfirmed": shooter_confirmed,
-            },
-        )
+                # 나중에 점수판이 수구를 확정하면 이 레이아웃으로 곧바로
+                # 예측을 다시 돌릴 수 있도록 마지막 확정 스냅샷을 보관한다.
+                self._last_confirmed = {
+                    "positions": dict(positions),
+                    "analysis": dict(analysis),
+                }
+        self.callback(positions, shooter, {**analysis, "shooterConfirmed": shooter_confirmed})
+
+    def _republish_last_confirmed(self) -> None:
+        """점수판이 수구를 확정한 순간, 마지막 확정 레이아웃으로 즉시 재예측."""
+        with self._lock:
+            snapshot = self._last_confirmed
+            positions = dict(snapshot["positions"]) if snapshot else None  # type: ignore[index]
+            analysis = dict(snapshot["analysis"]) if snapshot else None  # type: ignore[index]
+            shooter = self._shooter
+            shooter_confirmed = self._shooter_confirmed
+        if positions is None or analysis is None:
+            return
+        analysis["shooterConfirmed"] = shooter_confirmed
+        analysis["shooterRefresh"] = True
+        self.callback(positions, shooter, analysis)
 
     def _run(self, source: str, start_seconds: float, stop_event: Event) -> None:
         capture = None
@@ -237,10 +262,13 @@ class YoutubeLiveWorker:
                 daemon=True,
             )
             scoreboard_thread.start()
+            # YOLO 중심 좌표의 프레임 간 지터가 테이블 폭의 0.4%(0.004)를 쉽게
+            # 넘겨 정지 확정이 거의 안 잡히던 문제를 완화한다. 임계를 1.0%까지
+            # 올리고 안정 창을 0.3초로 줄여 확정 빈도와 반응 속도를 높인다.
             stop_detector = BallStopDetector(
-                stable_seconds=0.4,
-                stop_threshold=0.004,
-                move_threshold=0.015,
+                stable_seconds=0.3,
+                stop_threshold=0.010,
+                move_threshold=0.020,
             )
             precut_buffer = PreCutLayoutBuffer(
                 buffer_seconds=0.6,
@@ -296,6 +324,7 @@ class YoutubeLiveWorker:
                     complete_frames = 0
                     with self._lock:
                         self._shooter_confirmed = False
+                        self._last_confirmed = None
                     self._update(
                         syncing=False,
                         lastSyncedSeconds=sync_seconds,

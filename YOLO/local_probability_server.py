@@ -403,8 +403,12 @@ def main() -> None:
         }
         confirmed = bool(analysis.get("confirmed"))
         shooter_confirmed = bool(analysis.get("shooterConfirmed"))
+        # 공이 멈춰 레이아웃이 확정되면 수구가 아직 점수판으로 확정되지
+        # 않았어도 곧바로 확률을 계산한다(잠정값). 이후 점수판이 원형 안
+        # 숫자 색으로 수구를 확정하면 라이브 워커가 이 레이아웃으로 즉시
+        # 재예측을 요청하므로, 여기서는 shooterConfirmed 플래그만 실어 준다.
         prediction = None
-        if confirmed and shooter_confirmed:
+        if confirmed:
             prediction = service.predict(
                 {
                     "before": before,
@@ -412,12 +416,14 @@ def main() -> None:
                     "position_error_mm": 25.0,
                 }
             )
+            prediction["shooterConfirmed"] = shooter_confirmed
         detections.put(
             {
                 "before": before,
                 "shooter": shooter,
                 "prediction": prediction,
                 "confirmed": confirmed,
+                "shooterConfirmed": shooter_confirmed,
                 "analysis": analysis,
             }
         )
