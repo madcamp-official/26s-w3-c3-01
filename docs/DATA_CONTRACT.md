@@ -84,23 +84,29 @@
 | `video_id` | text | 유튜브 영상 id |
 | `turn` | int | 영상 내 턴 순번 (1부터). `(video_id, turn)` = 복합 PK |
 | `epoch` | int | 연속 구간(클립) 번호. **값이 튀면 카메라 컷 경계** (앞뒤 턴이 불연속) |
-| `shooter` | text | 수구: `white` \| `yellow` |
-| `success` | bool | 3쿠션 성공 여부. **`NULL` = 판정 보류** (궤적 관측 부족) → 학습 시 제외 권장 |
-| `success_method` | text | `trajectory` \| `insufficient` |
-| `coverage` | real | 샷 구간 수구 관측 비율(0~1). 낮으면 판정 신뢰도 낮음 |
-| `cushions_before_2nd` | int | 2번째 목적구 접촉 전 쿠션 수 (성공 근거) |
-| `hits` | jsonb | 접촉 순서 예: `["red","white"]` |
+| `shooter` | text | 수구: `white` \| `yellow` (점수판 기준) |
+| `success` | bool | 3쿠션 성공 여부. 점수판 판정이라 **거의 항상 true/false** (NULL은 폴백 케이스만) |
+| `success_method` | text | 현재는 **`scoreboard`**. (`trajectory`/`insufficient`는 구버전 레거시) |
+| `bank_shot` | bool | **뱅크샷(+2점) 여부** — 점수판 판정에서만 채워짐 |
+| `coverage` | real | 샷 구간 탑뷰 관측 비율(0~1). **낮으면 좌표가 근사치**(라벨은 여전히 점수판 근거라 유효) |
+| `cushions_before_2nd` | int | (레거시 궤적 판정용) 점수판 턴에서는 `NULL` |
+| `hits` | jsonb | (레거시) 점수판 턴에서는 `[]` |
 | `before_pos` | jsonb | **샷 직전** 3구 좌표 `{"white":[x,y],"yellow":[x,y],"red":[x,y]}` |
-| `after_pos` | jsonb | 샷 이후 3구 좌표 (동일 구조) |
-| `after_source` | text | `settled`=정지 확인 / `last_seen`=영상 컷으로 마지막 관측(근사값) |
-| `frame_start`,`frame_end` | int | 원본 영상 프레임 구간 |
+| `after_pos` | jsonb | 샷 이후 3구 좌표 (동일 구조). 턴 N의 `after` = 턴 N+1의 `before` (연결됨) |
+| `after_source` | text | 좌표 출처: `still`/`still_near`(정지 배치·정확) · `obs_near`/`obs_far`(공별 관측·근사) |
+| `frame_start`,`frame_end` | int | 원본 영상 프레임 구간 (= 이닝 이벤트 경계) |
 | `time_start_s`,`time_end_s` | real | 초 단위 구간 |
 | `loaded_at` | timestamptz | DB 적재 시각 |
 
+> `bank_shot`, `total_delta`, `totals` 등 상세 판정 근거는 원본 `turns.jsonl`의 `success_detail`에도
+> 들어 있다 (DB 컬럼은 위 표가 전부). `bank_shot`은 DB 컬럼으로도 승격돼 있음.
+
 ### 데이터 주의사항
-- **학습엔 `success IS NOT NULL`만 사용** (NULL은 판정 불가 케이스).
-- `after_source='last_seen'` 은 공이 완전히 멈추기 전 값이라 `after_pos`가 근사입니다. `before_pos`는 항상 정지 상태라 신뢰 가능.
-- `epoch`로 클립 경계를 알 수 있음 — "다음 턴 수구 연속성" 같은 시퀀스 가정은 같은 `epoch` 안에서만 유효.
+- **라벨(수구·성공·뱅크)은 방송 점수판 근거**라 신뢰도 높음. `success`가 NULL인 행은 사실상 없음.
+- **좌표 품질은 `coverage`/`after_source`로 판단**: `coverage`가 낮거나 `after_source`가 `obs_far`면
+  그 턴의 공 위치는 근사치(경계 부근에 정지 배치가 없어 움직이는 중 관측을 쓴 경우). 위치 정밀도가
+  중요한 학습이라면 `coverage >= 0.3` 등으로 거르는 걸 권장.
+- `epoch`로 클립 경계를 알 수 있음 — 점수판 주도 턴은 대부분 `epoch=0`.
 
 ---
 
@@ -108,9 +114,10 @@
 
 ### SQL — 학습 데이터 조회 (VPC 안 EC2에서)
 ```sql
-SELECT shooter, before_pos, success, cushions_before_2nd, coverage
+SELECT shooter, before_pos, after_pos, success, bank_shot, coverage
 FROM billiard_turns
 WHERE success IS NOT NULL
+  AND coverage >= 0.3          -- 좌표가 근사치인 저품질 턴 제외 (선택)
 ORDER BY video_id, turn;
 ```
 
@@ -136,13 +143,14 @@ JSONL 각 줄이 테이블 한 행과 동일한 필드 구성입니다.
 
 ## 7. 샘플 레코드
 ```json
-{"video_id": "XFE136kVJ-c", "turn": 1, "epoch": 0, "shooter": "white",
- "before_pos": {"white": [0.50, 0.39], "yellow": [0.74, 0.50], "red": [0.26, 0.50]},
- "after_pos":  {"white": [0.14, 0.12], "yellow": [0.48, 0.19], "red": [0.27, 0.13]},
- "success": true, "success_method": "trajectory", "coverage": 1.0,
- "cushions_before_2nd": 4, "hits": ["red", "white"],
- "after_source": "settled", "time_start_s": 27.0}
+{"video_id": "당구분석3", "turn": 2, "epoch": 0, "shooter": "yellow",
+ "before_pos": {"white": [0.66, 0.24], "yellow": [0.68, 0.29], "red": [0.11, 0.13]},
+ "after_pos":  {"white": [0.62, 0.44], "yellow": [0.34, 0.41], "red": [0.11, 0.94]},
+ "success": true, "success_method": "scoreboard", "bank_shot": true,
+ "coverage": 0.59, "cushions_before_2nd": null, "hits": [],
+ "after_source": "obs_near", "time_start_s": 4.9}
 ```
+> 뱅크샷 예시: 이닝 원형 1→3 **그리고** 총점 박스 +2가 함께 확인돼 `bank_shot=true`.
 
 ---
 
