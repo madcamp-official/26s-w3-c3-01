@@ -266,8 +266,26 @@ class YoutubeLiveWorker:
                 cycle_started = monotonic()
                 sync_seconds = self._take_pending_sync()
                 if sync_seconds is not None:
-                    frame_number = max(0, round(sync_seconds * fps))
+                    target_frame = max(0, round(sync_seconds * fps))
+                    # 유튜브 네트워크 스트림은 읽기 시작 후 POS_FRAMES 중간 seek가 먹지 않는다.
+                    # 위치 차이가 크면(사용자 탐색) 스트림을 다시 열어 최초 open+seek 경로를 재현한다.
+                    big_jump = abs(target_frame - frame_number) > fps * 2
+                    if big_jump:
+                        capture.release()
+                        capture = cv2.VideoCapture(video.media_url)
+                        # 탐색 후엔 카메라 구도가 달라질 수 있으니 테이블 기준도 재획득.
+                        self.analyzer.reset_tracking()
+                    frame_number = target_frame
                     capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                    # 일부 스트림 변종은 프레임 단위 seek 를 조용히 무시한다(0초부터
+                    # 재생됨). 실제 도달 위치를 확인하고 어긋나면 msec seek 로 폴백.
+                    achieved = float(capture.get(cv2.CAP_PROP_POS_FRAMES) or 0.0)
+                    if abs(achieved - target_frame) > fps * 2:
+                        capture.set(cv2.CAP_PROP_POS_MSEC, float(sync_seconds) * 1000.0)
+                        achieved = float(capture.get(cv2.CAP_PROP_POS_FRAMES) or 0.0)
+                    self._update(
+                        lastSeekAchievedSeconds=achieved / fps if fps else None
+                    )
                     stop_detector.reset()
                     precut_buffer.clear()
                     scoreboard_epoch += 1
