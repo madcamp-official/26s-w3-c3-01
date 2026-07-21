@@ -3,7 +3,9 @@
 
 ## 당구 영상 → 턴 데이터 자동 추출 파이프라인
 
-유튜브 3쿠션 중계 영상에서 매 턴(샷)의 데이터를 자동으로 뽑아 서버 DB(PostgreSQL)에 저장한다:
+유튜브 3쿠션 중계 영상에서 매 턴(샷)의 데이터를 자동으로 뽑아 서버 DB(PostgreSQL)에 저장한다.
+**턴은 방송 점수판의 이닝 이벤트가 정의하고**(영상 추적이 끊겨도 점수판 변화만 있으면 턴 확정),
+영상(YOLO)은 그 턴의 공 좌표만 채운다. 상세 판정 기준: [docs/EXTRACTION_CRITERIA.md](docs/EXTRACTION_CRITERIA.md).
 
 - `before`: 샷 직전 공 3개 위치 (당구대 기준 0~1 정규화, [x, y])
 - `shooter`: 수구 (white / yellow) — **점수판 원형(현재 이닝 표시) 기준**: 점수 박스 오른쪽
@@ -15,7 +17,10 @@
   **점수판으로 판정 못 한 턴은 폐기한다** — 궤적(쿠션 세기) 판정은 신뢰도가 낮아 라벨로
   쓰지 않는다. 점수판이 없는 영상(스포방지 마스킹·비방송 영상)은 0턴이 된다.
   DB의 `success_method` 는 항상 `scoreboard`, 로더도 그 외 판정을 걸러낸다(이중 방어).
-- `after`: 샷 이후 공 3개 위치 (`after_source: settled`=정지 확인, `last_seen`=영상 컷으로 마지막 관측값)
+- `after`: 샷 이후 공 3개 위치. `after_source`로 좌표 출처 표시 — `still`/`still_near`(정지 배치·정확),
+  `obs_near`/`obs_far`(공별 최근접 관측·근사). 턴 N의 `after` = 턴 N+1의 `before` (연결됨)
+- `bank_shot`: 뱅크샷(+2점) 여부 — 이닝 원형 +2 또는 총점 박스 +2 교차 판정
+- `coverage`: 탑뷰 관측 비율 — 낮으면 좌표가 근사치(라벨은 점수판이라 여전히 유효)
 
 ---
 
@@ -122,16 +127,18 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
 ## turns.jsonl 스키마 예시
 
 ```json
-{"video_id": "WV3tL6z3cqo", "turn": 3, "epoch": 2, "shooter": "yellow",
- "before": {"white": [0.42, 0.31], "yellow": [0.38, 0.62], "red": [0.71, 0.28]},
- "after":  {"white": [0.15, 0.44], "yellow": [0.55, 0.80], "red": [0.61, 0.22]},
- "after_source": "settled",
+{"video_id": "당구분석3", "turn": 2, "epoch": 0, "shooter": "yellow",
+ "before": {"white": [0.66, 0.24], "yellow": [0.68, 0.29], "red": [0.11, 0.13]},
+ "after":  {"white": [0.62, 0.44], "yellow": [0.34, 0.41], "red": [0.11, 0.94]},
+ "after_source": "obs_near",
  "success": true,
- "success_detail": {"method": "scoreboard", "score_steps": [[1620, 0, 1]],
-                    "bank_shot": false, "traj_success": true, "coverage": 0.87,
-                    "hits": ["red", "white"], "cushions_before_2nd": 4},
- "frame_start": 1520, "frame_end": 1893,
- "time_start_s": 50.7, "time_end_s": 63.1}
+ "success_detail": {"method": "scoreboard", "shooter_source": "scoreboard",
+                    "run_from": 1, "run_to": 3, "total_delta": 2,
+                    "totals": [[6, 4], [6, 6]], "bank_shot": true, "coverage": 0.59,
+                    "before_source": "still_near", "after_pos_source": "obs_near",
+                    "hits": [], "cushions_before_2nd": null},
+ "frame_start": 280, "frame_end": 1290,
+ "time_start_s": 4.9, "time_end_s": 22.9}
 ```
 
 - `epoch`: 탑뷰가 길게 끊길 때마다 증가하는 클립 번호. 같은 epoch 안의 연속 턴만 시간적으로 이어진 것.
