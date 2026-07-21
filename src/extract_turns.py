@@ -70,6 +70,13 @@ class TurnExtractor:
         self.shot = None                # 진행 중 샷 정보
         self.turns = []
         self.last_update_frame = None
+        # ---- 점수판 주도 방식용: 정지 배치 타임라인 + 관측 프레임 ----
+        # STILL→SHOT→STILL 상태기계와 무관하게, 3구가 멈춘 구간을 전부 기록한다.
+        # 점수판 이벤트로 턴을 만들 때 여기서 before/after 좌표를 최근접으로 가져온다.
+        self.still_log = []             # [(f_start, f_last, layout)] 정지 배치 구간
+        self._cur_still = None          # 진행 중 정지 구간
+        self.tracked_frames = []        # 탑뷰로 공이 관측된 프레임 (커버리지 계산용)
+        self.obs = {b: [] for b in BALLS}   # 공별 전체 관측 [(frame, x, y)] (좌표 폴백용)
 
     # ---------- 내부 유틸 ----------
     def _reset(self):
@@ -79,6 +86,27 @@ class TurnExtractor:
         self.still_layout = None
         self.depart = {b: 0 for b in BALLS}
         self.epoch += 1
+        # 진행 중 정지 구간은 확정 저장하고 끊는다 (still_log 는 전 영상 누적이라 유지)
+        if self._cur_still:
+            self.still_log.append(self._cur_still)
+            self._cur_still = None
+
+    def _record_still(self, frame_idx, layout):
+        """정지 배치 타임라인 갱신: 같은 배치면 구간 연장, 바뀌면 새 구간, 없으면 구간 종료."""
+        if layout is None:
+            if self._cur_still:
+                self.still_log.append(self._cur_still)
+                self._cur_still = None
+            return
+        if self._cur_still and all(
+                abs(layout[b][0] - self._cur_still[2][b][0]) <= 2 * STILL_EPS
+                and abs(layout[b][1] - self._cur_still[2][b][1]) <= 2 * STILL_EPS
+                for b in BALLS):
+            self._cur_still = (self._cur_still[0], frame_idx, self._cur_still[2])
+        else:
+            if self._cur_still:
+                self.still_log.append(self._cur_still)
+            self._cur_still = (frame_idx, frame_idx, layout)
 
     def _still_layout(self, frame_idx):
         """세 공 모두 정지 상태면 {ball: (x, y)} 반환, 아니면 None."""
@@ -137,6 +165,13 @@ class TurnExtractor:
             if self.state == "SHOT":
                 self.shot["traj"][name].append((frame_idx, tx, ty))
 
+        # 점수판 주도용: 관측 프레임 + 공별 관측 + 정지 배치 타임라인 (상태기계와 독립)
+        if best:
+            self.tracked_frames.append(frame_idx)
+        for name, (_, tx, ty) in best.items():
+            self.obs[name].append((frame_idx, tx, ty))
+        self._record_still(frame_idx, self._still_layout(frame_idx))
+
         if self.state in ("SEEK_STILL", "STILL"):
             layout = self._still_layout(frame_idx)
             if self.state == "SEEK_STILL":
@@ -164,6 +199,9 @@ class TurnExtractor:
         """영상 끝: 진행 중이던 샷을 마지막 관측 기준으로 마무리."""
         if self.state == "SHOT":
             self._finalize_shot(frame_idx, settled=False)
+        if self._cur_still:                 # 마지막 정지 구간 확정
+            self.still_log.append(self._cur_still)
+            self._cur_still = None
 
     # ---------- 샷 시작/종료 ----------
     def _detect_mover(self, best):
@@ -322,6 +360,90 @@ def drop_unjudged_turns(turns):
     반환: (남긴 턴, 버린 수). 남긴 턴은 저장 시 1부터 다시 번호가 매겨진다."""
     kept = [t for t in turns if t["success_detail"].get("method") == "scoreboard"]
     return kept, len(turns) - len(kept)
+
+
+def _nearest_obs(seq, frame):
+    """정렬된 [(f, x, y)] 에서 frame 에 가장 가까운 관측과 프레임 거리를 반환."""
+    import bisect
+    if not seq:
+        return None
+    fs = [p[0] for p in seq]
+    i = bisect.bisect_left(fs, frame)
+    cands = []
+    if i < len(seq):
+        cands.append(seq[i])
+    if i > 0:
+        cands.append(seq[i - 1])
+    f, x, y = min(cands, key=lambda p: abs(p[0] - frame))
+    return (x, y), abs(f - frame)
+
+
+def _pos_at(still_log, obs, frame, tol):
+    """frame 시점의 3구 좌표. ① frame 을 포함/근접(tol)하는 정지 배치(정확),
+    ② 없으면 공별 최근접 관측(움직임 중일 수 있음). 반환 (layout|None, source).
+    source: still | still_near | obs_near | obs_far | none."""
+    if still_log:
+        for f0, f1, lay in still_log:
+            if f0 <= frame <= f1:
+                return lay, "still"
+        f0, f1, lay = min(still_log,
+                          key=lambda iv: (iv[0] - frame if frame < iv[0] else frame - iv[1]))
+        d = f0 - frame if frame < f0 else frame - f1
+        if d <= tol:
+            return lay, "still_near"
+    # 정지 배치가 멀면 공별 최근접 관측으로 폴백 (각 공의 그 시점 위치를 개별 추정)
+    layout, maxd = {}, 0
+    for b in BALLS:
+        r = _nearest_obs(obs.get(b, []), frame)
+        if r is None:
+            return None, "none"
+        layout[b], d = r
+        maxd = max(maxd, d)
+    return layout, ("obs_near" if maxd <= tol else "obs_far")
+
+
+def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
+    """점수판 이닝 이벤트(active_events)로 턴을 '정의'한다 — 점수판 우선 방식.
+    연속한 두 이벤트 [ev_i, ev_{i+1}) = 한 턴. 수구=ev_i 색, 성공=다음 이벤트가
+    같은 색이며 이닝 점수가 올랐는지(+2=뱅크샷). 색이 바뀌면 실패(턴 교대).
+    좌표(before/after)는 정지 배치 로그에서 이벤트 프레임 최근접으로 채운다.
+    → 영상이 정지→샷→정지를 못 잡아도 점수판 변화만 있으면 턴이 확정된다."""
+    ev = reader.active_events
+    col = {"white", "yellow"}
+    tol = int(2.0 * fps)              # 정지 배치 최근접 허용 (2초)
+    tf = sorted(tracked_frames)
+    import bisect
+    turns = []
+    for i in range(len(ev) - 1):
+        f0, color, run0 = ev[i]
+        f1, ncolor, run1 = ev[i + 1]
+        if color not in col:
+            continue
+        if ncolor == color and run1 > run0:      # 같은 선수가 계속 = 득점
+            success, bank = True, (run1 - run0) == 2
+        else:                                     # 색 바뀜/점수 그대로 = 실패(턴 교대)
+            success, bank = False, False
+        before, bsrc = _pos_at(still_log, obs, f0, tol)
+        after, asrc = _pos_at(still_log, obs, f1, tol)
+        if before is None or after is None:
+            continue                              # 정지 배치가 전무 → 좌표 없어 폐기
+        cov = ((bisect.bisect_left(tf, f1) - bisect.bisect_left(tf, f0))
+               / max(f1 - f0, 1))
+        det = {
+            "method": "scoreboard", "shooter_source": "scoreboard",
+            "coverage": round(min(cov, 1.0), 2),
+            "before_source": bsrc, "after_pos_source": asrc,
+            "run_from": int(run0), "run_to": int(run1),
+            "bank_shot": bank, "hits": [], "cushions_before_2nd": None,
+        }
+        turns.append({
+            "epoch": 0, "shooter": color,
+            "before": before, "after": after, "after_source": asrc,
+            "success": success, "success_detail": det,
+            "frame_start": int(f0), "frame_end": int(f1),
+            "traj": {b: [] for b in BALLS},
+        })
+    return turns
 
 
 def apply_scoreboard_judgment(turns, reader, fps):
@@ -499,17 +621,26 @@ def main():
     extractor.flush(frame_idx)
     cap.release()
 
-    # 점수판 기반: ① 리플레이 유령 턴 제거 → ② 성공 판정 → ③ 판정 불가 턴 폐기
-    if score_reader and score_reader.locked and score_reader.events:
+    # 점수판 주도 방식: 이닝 이벤트가 턴을 '정의'한다 (영상 정지→샷→정지에 의존하지 않음).
+    if score_reader and score_reader.locked and len(score_reader.active_events) >= 2:
+        turns = build_turns_from_scoreboard(
+            score_reader, extractor.still_log, extractor.obs, extractor.tracked_frames, fps)
+        n_lowcov = sum(1 for t in turns if t["success_detail"]["coverage"] < 0.2)
+        n_far = sum(1 for t in turns
+                    if "far" in t["success_detail"]["before_source"]
+                    or "far" in t["success_detail"]["after_pos_source"])
+        extractor.turns = turns
+        print(f"점수판 주도 턴 생성: {len(turns)}턴 "
+              f"(이닝 이벤트 {len(score_reader.active_events)}개, 정지배치 {len(extractor.still_log)}개) "
+              f"| 저커버리지 {n_lowcov}, 좌표원거리 {n_far}")
+    elif score_reader and score_reader.locked and score_reader.events:
+        # 이닝 원형은 못 읽었지만 총점 박스는 읽힌 방송 → 구(舊) 방식(영상 턴 + 총점 판정)으로 폴백
         kept, dropped = drop_replay_turns(extractor.turns, score_reader)
-        for t, frac in dropped:
-            print(f"  리플레이 유령 턴 제거: 프레임 {t['frame_start']}~{t['frame_end']} "
-                  f"(점수판 노출 {frac:.0%})")
         extractor.turns = kept
         n_sb = apply_scoreboard_judgment(extractor.turns, score_reader, fps)
         extractor.turns, n_unjudged = drop_unjudged_turns(extractor.turns)
-        print(f"점수판 판정: {n_sb}턴 확정 | 폐기: 유령 턴 {len(dropped)}개, "
-              f"판정 불가 {n_unjudged}개 (점수 이벤트 {len(score_reader.events)}개)")
+        print(f"[폴백] 이닝 이벤트 부족 → 영상 턴 + 총점 판정: {n_sb}턴 확정, "
+              f"판정 불가 {n_unjudged}개")
     elif score_reader:
         # 점수판이 아예 없는 영상(스포방지·화면기록 등) → 라벨 신뢰 불가, 전 턴 폐기
         print(f"점수판 미검출 → 전 {len(extractor.turns)}턴 폐기 (점수판 없는 영상은 데이터로 쓰지 않음)")
