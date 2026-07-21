@@ -410,17 +410,44 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
     → 영상이 정지→샷→정지를 못 잡아도 점수판 변화만 있으면 턴이 확정된다."""
     ev = reader.active_events
     col = {"white", "yellow"}
+    col_idx = {"white": 1, "yellow": 2}
     tol = int(2.0 * fps)              # 정지 배치 최근접 허용 (2초)
     tf = sorted(tracked_frames)
     import bisect
+
+    def totals_at(f):
+        """f 이전(포함) 마지막으로 판독된 (frame, 흰총점, 노란총점). 없으면 None."""
+        last = None
+        for fe, w, y in reader.events:
+            if fe <= f:
+                last = (fe, w, y)
+            else:
+                break
+        return last
+
     turns = []
     for i in range(len(ev) - 1):
         f0, color, run0 = ev[i]
         f1, ncolor, run1 = ev[i + 1]
         if color not in col:
             continue
-        if ncolor == color and run1 > run0:      # 같은 선수가 계속 = 득점
-            success, bank = True, (run1 - run0) == 2
+        # 득점 근거 ①: 이닝 원형 증가량. 득점 근거 ②: 총점 박스 증가량.
+        # 두 표시는 오퍼레이터가 동시에 올리므로 서로의 판독 누락을 보완한다
+        # (총점 반영이 이벤트 경계보다 살짝 늦을 수 있어 f1 뒤 여유를 둔다).
+        run_delta = (run1 - run0) if ncolor == color else 0
+        # 총점 반영은 이닝 원형보다 살짝 늦다(오퍼레이터 입력 지연). 창의 양 끝을
+        # 같은 지연폭만큼 밀어 비교해야 직전 턴의 득점이 이 턴에 귀속되지 않는다.
+        lag = int(SCORE_FAIL_MARGIN_S * fps)
+        t_before = totals_at(f0 + lag)
+        t_after = totals_at(f1 + lag)
+        me = col_idx[color]
+        total_delta = (t_after[me] - t_before[me]) if (t_before and t_after) else 0
+        if run_delta > 0 or (0 < total_delta <= 2):
+            success = True
+            # 뱅크샷(+2): 이닝 원형이 +2를 직접 봤으면 확정. 원형이 +1을 명확히
+            # 봤으면 일반 득점(총점 +2는 이전 누락분 몰아반영일 수 있어 무시).
+            # 원형 판독이 없을 때만 총점 +2를 뱅크 근거로 쓴다.
+            bank = (run_delta == 2) or (run_delta <= 0 and total_delta == 2)
         else:                                     # 색 바뀜/점수 그대로 = 실패(턴 교대)
             success, bank = False, False
         before, bsrc = _pos_at(still_log, obs, f0, tol)
@@ -434,6 +461,9 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
             "coverage": round(min(cov, 1.0), 2),
             "before_source": bsrc, "after_pos_source": asrc,
             "run_from": int(run0), "run_to": int(run1),
+            "total_delta": int(total_delta),
+            "totals": [list(map(int, t_before[1:])) if t_before else None,
+                       list(map(int, t_after[1:])) if t_after else None],
             "bank_shot": bank, "hits": [], "cushions_before_2nd": None,
         }
         turns.append({
@@ -600,6 +630,13 @@ def main():
         else:
             balls_tbl = []
         extractor.tick(frame_idx, balls_tbl)
+
+        # 정지 순간 동기화 샘플링: 공이 멈춰 있는 프레임에서는 점수판을 즉시 읽는다.
+        # (좌표 스냅샷과 점수판 스냅샷을 같은 시점에 확보 → 수구/이닝/총점 놓침 방지.
+        #  sample() 내부의 픽셀 변화 게이트 덕에 실제 OCR은 값이 바뀔 때만 돈다.)
+        if score_reader and extractor._cur_still \
+                and extractor._cur_still[1] == frame_idx:
+            score_reader.sample(frame_idx, frame)
 
         # 샷 시작 시점 프레임 저장 (점수판 포함 → 성공 여부 수동 검증용)
         if args.save_frames and extractor.state == "SHOT" and extractor.shot \
