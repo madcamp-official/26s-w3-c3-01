@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+import sys
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -23,6 +25,38 @@ class VideoSource:
     title: str
     duration_seconds: float | None
     source_kind: str
+
+
+def _youtube_cookie_options() -> dict[str, Any]:
+    """Build yt-dlp cookie options from the environment.
+
+    YouTube blocks datacenter IPs (e.g. EC2) with a "Sign in to confirm you're
+    not a bot" error, which kills both the pre-shot layout analysis and the live
+    worker. Passing browser cookies is the documented workaround.
+
+    - YTDLP_COOKIES=/path/to/cookies.txt        (Netscape cookie file)
+    - YTDLP_COOKIES_FROM_BROWSER=chrome[:profile] (local machines with a browser)
+    """
+    options: dict[str, Any] = {}
+
+    cookie_file = os.environ.get("YTDLP_COOKIES", "").strip()
+    if cookie_file:
+        cookie_path = Path(cookie_file).expanduser()
+        if cookie_path.exists():
+            options["cookiefile"] = str(cookie_path)
+        else:
+            print(
+                f"[cuecast] YTDLP_COOKIES가 가리키는 파일이 없습니다: {cookie_path}",
+                file=sys.stderr,
+            )
+
+    browser_spec = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+    if browser_spec:
+        browser, _, profile = browser_spec.partition(":")
+        if browser:
+            options["cookiesfrombrowser"] = (browser, profile or None, None, None)
+
+    return options
 
 
 class VideoPositionAnalyzer:
@@ -153,6 +187,7 @@ class VideoPositionAnalyzer:
                 "best[protocol^=http][vcodec!=none][height<=720]/"
                 "best[height<=720]/best"
             ),
+            **_youtube_cookie_options(),
         }
         try:
             with YoutubeDL(options) as ydl:
