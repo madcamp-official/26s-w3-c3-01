@@ -441,7 +441,10 @@ class RealtimePbaScoreboardReader:
             x, y, w, h = cv2.boundingRect(contour)
             if not 0.0008 * frame_area < w * h < 0.02 * frame_area:
                 continue
-            if cv2.contourArea(contour) / max(w * h, 1) < 0.85:
+            # 저해상도(360p)에서 작은 점수 셀은 검은 숫자가 차지하는 비중이 커
+            # 채움비가 0.8 안팎까지 내려간다(예: PBA 챔피언십 24-25 오버레이).
+            # 흰 박스 검증·5프레임 안정 lock 이 뒤에 있으므로 0.72 까지 완화.
+            if cv2.contourArea(contour) / max(w * h, 1) < 0.72:
                 continue
             if not 0.5 < w / max(h, 1) < 2.2:
                 continue
@@ -563,6 +566,20 @@ class RealtimePbaScoreboardReader:
         if fraction < 0.45:
             return None
         value = self.recognizer(crop)
+        if value is None:
+            # 360p 저해상도에서 tesseract 가 한 자리 숫자를 통째로 놓치는 경우가
+            # 있다(예: 24-25 오버레이의 "0"). 두 자리 점수를 한 자리로 오독하지
+            # 않도록 잉크 폭이 셀 폭의 55% 이하일 때만 합성 KNN 으로 폴백한다.
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            _, ink = cv2.threshold(
+                gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
+            # 셀 테두리의 어두운 픽셀이 잉크 폭을 왜곡하지 않도록 여백은 제외.
+            margin = max(1, round(0.15 * min(ink.shape)))
+            interior = ink[margin:-margin, margin:-margin]
+            columns = np.where(interior.max(axis=0) > 0)[0]
+            if columns.size and (columns[-1] - columns[0] + 1) <= 0.55 * crop.shape[1]:
+                value = self.header_recognizer(crop)
         return value if value is not None and value <= 40 else None
 
     def _read_circle(
