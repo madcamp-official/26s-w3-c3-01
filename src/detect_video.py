@@ -300,14 +300,18 @@ def main():
         fast = detect_corners_fast(frame)
         if corners is None:
             if plausible_top_view(fast, frame.shape):
-                corners = find_table_corners(frame)   # 기준은 원본 해상도로 정밀 검출
-                m_inv = cv2.getPerspectiveTransform(
-                    np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]), corners)
-                print(f"당구대 꼭짓점 (프레임 {frame_idx}):", corners.astype(int).tolist())
+                cand = find_table_corners(frame)      # 기준은 원본 해상도로 정밀 검출
+                # 전체해상도 꼭짓점도 검증 후 잠금: 인트로 배경이 화면 전체를 '당구대'로
+                # 오검출해 엉터리 기준이 잠기는 것(→ 이후 전 프레임 카메라컷 오판)을 막는다.
+                if plausible_top_view(cand, frame.shape):
+                    corners = cand
+                    m_inv = cv2.getPerspectiveTransform(
+                        np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]), corners)
+                    print(f"당구대 꼭짓점 (프레임 {frame_idx}):", corners.astype(int).tolist())
             top_view = False
         else:
             top_view = (plausible_top_view(fast, frame.shape)
-                        and np.abs(fast - corners).max() < 60)
+                        and np.abs(fast - corners).max() < 90)  # extract_turns 의 CORNER_CUT_TOL 과 일치
 
         res = model(frame, verbose=False)[0]
         balls = []

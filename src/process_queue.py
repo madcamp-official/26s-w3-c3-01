@@ -31,6 +31,11 @@ YTDLP = os.path.join(ROOT, "venv", "bin", "yt-dlp")
 YTDLP_FORMAT = "bv*[ext=mp4][vcodec^=avc1][height<=1080]/bv*[height<=1080]/b"
 STALE_LOCK_S = 6 * 3600
 
+# YouTube 봇 차단("Sign in to confirm you're not a bot") 회피용 쿠키.
+# YTDLP_COOKIES 에 브라우저명(chrome/safari/firefox/edge/brave) 또는 cookies.txt 경로를 넣으면
+# 다운로드 시 yt-dlp 에 인증 쿠키가 전달된다. 비어 있으면 쿠키 없이 시도한다.
+YTDLP_COOKIES = os.environ.get("YTDLP_COOKIES", "").strip()
+
 # 결과 저장(S3) / 원본 영상 정리 설정 — cron에서는 worker_autostop.sh 가 config.sh 를
 # source 하므로 거기서 export 한 값이 여기로 들어온다. 값이 없으면 각 단계를 건너뛴다.
 S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()       # 예: s3://my-bucket 또는 my-bucket
@@ -60,6 +65,16 @@ def upload_results(vid, outdir):
             s3.upload_file(local, bucket, key)
             n += 1
     log(f"S3 업로드: {outdir} → s3://{bucket}/{S3_PREFIX}/{vid}/ ({n}개 파일)")
+
+
+def ytdlp_cookie_args():
+    """YTDLP_COOKIES 값에 따라 yt-dlp 쿠키 인자를 만든다.
+    파일 경로면 --cookies, 그 외(브라우저명)면 --cookies-from-browser. 미설정이면 빈 리스트."""
+    if not YTDLP_COOKIES:
+        return []
+    if os.path.isfile(YTDLP_COOKIES):
+        return ["--cookies", YTDLP_COOKIES]
+    return ["--cookies-from-browser", YTDLP_COOKIES]
 
 
 def video_id_of(url):
@@ -96,9 +111,12 @@ def process_url(url):
 
     if not os.path.exists(video_path):
         log(f"다운로드: {url} → {video_path}")
+        # --remote-components ejs:github : YouTube 의 JS 챌린지(nsig)를 푸는 솔버 스크립트를
+        # yt-dlp 공식 저장소(github.com/yt-dlp/ejs)에서 받아 실행. 없으면 "Only images available"
+        # 로 영상 포맷을 못 가져온다. 스크립트는 한 번 받으면 캐시된다.
         subprocess.run(
-            [YTDLP, "--js-runtimes", "node", "-f", YTDLP_FORMAT,
-             "-o", video_path, url],
+            [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github",
+             *ytdlp_cookie_args(), "-f", YTDLP_FORMAT, "-o", video_path, url],
             check=True, timeout=1800)
 
     log(f"턴 추출: {video_path}")
