@@ -60,10 +60,17 @@ class LiveMatchCoordinator:
     def update_scoreboard(self, scoreboard: dict[str, object]) -> dict[str, object]:
         with self._lock:
             previous = self._scoreboard
-            current_set = int(scoreboard.get("set", 1))
-            if previous is None and current_set > 1:
+            merged = {
+                **(previous or {}),
+                **{key: value for key, value in scoreboard.items() if value is not None},
+            }
+            current_set_value = merged.get("set")
+            current_set = (
+                int(current_set_value) if current_set_value is not None else None
+            )
+            if previous is None and current_set is not None and current_set > 1:
                 self._unknown_completed_sets = current_set - 1
-            if previous is not None:
+            if previous is not None and current_set is not None:
                 previous_set = int(previous.get("set", current_set))
                 if current_set < previous_set:
                     self._sets_won_a = self._sets_won_b = 0
@@ -85,15 +92,15 @@ class LiveMatchCoordinator:
                     self._shot_probability = None
                 else:
                     score_changed = any(
-                        int(previous.get(key, -1)) != int(scoreboard.get(key, -1))
+                        previous.get(key) != merged.get(key)
                         for key in ("player1Score", "player2Score")
                     )
-                    player_changed = previous.get("activeColor") != scoreboard.get(
+                    player_changed = previous.get("activeColor") != merged.get(
                         "activeColor"
                     )
                     if score_changed or player_changed:
                         self._shot_probability = None
-            self._scoreboard = dict(scoreboard)
+            self._scoreboard = merged
             current_player = self._player_for_color(
                 self._scoreboard, self._scoreboard.get("activeColor")
             )
@@ -133,6 +140,9 @@ class LiveMatchCoordinator:
         scoreboard = self._scoreboard
         if scoreboard is None:
             return self._waiting("점수판 인식 대기 중")
+        required_score_fields = ("set", "player1Score", "player2Score")
+        if any(scoreboard.get(key) is None for key in required_score_fields):
+            return self._waiting("세트와 점수 인식 대기 중")
         names = self._manual_names or (
             scoreboard.get("player1Name"),
             scoreboard.get("player2Name"),

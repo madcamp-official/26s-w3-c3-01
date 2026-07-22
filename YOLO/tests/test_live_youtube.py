@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
 from cuecast_yolo.live_youtube import YoutubeLiveWorker, layout_distance
 from cuecast_yolo.minsu_detector import TrackingFrame
 from cuecast_yolo.scoreboard_reader import ScoreboardReading
-from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
+from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer, VideoSource
 
 
 POSITIONS = {
@@ -19,6 +19,29 @@ POSITIONS = {
 
 
 class YoutubeLiveWorkerTest(unittest.TestCase):
+    @patch("cuecast_yolo.live_youtube.cv2.VideoCapture")
+    def test_refreshes_youtube_cdn_url_when_cached_stream_cannot_open(
+        self, video_capture: MagicMock
+    ) -> None:
+        analyzer = MagicMock()
+        analyzer.resolve.side_effect = [
+            VideoSource("stale-url", "match", 100.0, "youtube"),
+            VideoSource("fresh-url", "match", 100.0, "youtube"),
+        ]
+        stale_capture = MagicMock()
+        stale_capture.isOpened.return_value = False
+        fresh_capture = MagicMock()
+        fresh_capture.isOpened.return_value = True
+        video_capture.side_effect = [stale_capture, fresh_capture]
+        worker = YoutubeLiveWorker(analyzer, lambda *_: None)
+
+        video, capture = worker._open_capture("youtube-url")
+
+        self.assertEqual(video.media_url, "fresh-url")
+        self.assertIs(capture, fresh_capture)
+        stale_capture.release.assert_called_once_with()
+        analyzer.invalidate_resolved_source.assert_called_once_with("youtube-url")
+
     def test_realtime_analyzer_prefers_first_top_view_fixed_yolo_detector(self) -> None:
         analyzer = VideoPositionAnalyzer.__new__(VideoPositionAnalyzer)
         analyzer._detector_lock = MagicMock()
@@ -139,6 +162,28 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         self.assertEqual(status["scoreboard"]["activeColor"], "yellow")
         callback.assert_called_once()
         layout_callback.assert_not_called()
+
+    def test_partial_scoreboard_updates_are_merged_before_callback(self) -> None:
+        callback = MagicMock()
+        worker = YoutubeLiveWorker(
+            VideoPositionAnalyzer(), lambda *_: None, scoreboard_callback=callback
+        )
+
+        worker._accept_scoreboard(
+            ScoreboardReading(None, None, 3, 4, None, None, None, "white"),
+            12.0,
+        )
+        worker._accept_scoreboard(
+            ScoreboardReading(1, None, None, None, None, None, None, "white", "A", "B"),
+            12.5,
+        )
+
+        scoreboard = worker.status()["scoreboard"]
+        self.assertEqual(scoreboard["set"], 1)
+        self.assertEqual(scoreboard["player1Score"], 3)
+        self.assertEqual(scoreboard["player2Score"], 4)
+        self.assertEqual(scoreboard["player1Name"], "A")
+        self.assertEqual(callback.call_args.args[0], scoreboard)
 
     def test_scoreboard_confirm_republishes_last_confirmed_layout(self) -> None:
         layout_callback = MagicMock()

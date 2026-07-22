@@ -33,7 +33,10 @@ from cuecast_yolo.prematch_probability import (
     PrematchService,
     create_prematch_service,
 )
-from cuecast_yolo.prematch_live_inputs import PrematchLiveInputProvider
+from cuecast_yolo.prematch_live_inputs import (
+    LockedScoreboardPlayerMatcher,
+    PrematchLiveInputProvider,
+)
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -130,7 +133,16 @@ class DetectionStore:
 
     def put_scoreboard(self, scoreboard: dict[str, object]) -> dict[str, object]:
         with self._lock:
-            self._scoreboard = {"scoreboard": dict(scoreboard)}
+            previous = self._scoreboard.get("scoreboard")
+            merged = {
+                **(previous if isinstance(previous, dict) else {}),
+                **{
+                    key: value
+                    for key, value in scoreboard.items()
+                    if value is not None
+                },
+            }
+            self._scoreboard = {"scoreboard": merged}
             return dict(self._scoreboard)
 
     def clear_scoreboard(self) -> dict[str, object]:
@@ -165,6 +177,7 @@ def create_handler(
     video_analyzer: VideoPositionAnalyzer,
     live_worker: YoutubeLiveWorker,
     live_match: LiveMatchCoordinator,
+    scoreboard_names: LockedScoreboardPlayerMatcher,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, payload: object, status: int = HTTPStatus.OK) -> None:
@@ -362,6 +375,7 @@ def create_handler(
                         raise ValueError("shooter는 white 또는 yellow여야 합니다")
                     detections.clear()
                     live_match.reset()
+                    scoreboard_names.reset()
                     live_worker.start(
                         str(payload["url"]),
                         float(payload.get("timestamp_seconds", 0.0)),
@@ -392,6 +406,7 @@ def create_handler(
                     )
                     return
                 if path == "/api/v1/youtube/live/scoreboard/reset":
+                    scoreboard_names.reset()
                     live_worker.reset_scoreboard()
                     detections.clear_scoreboard()
                     self._send_json(live_worker.status())
@@ -472,7 +487,9 @@ def main() -> None:
         table_config=args.table.resolve(), model_path=args.ball_model.resolve()
     )
     prematch_service = create_prematch_service()
-    live_match = LiveMatchCoordinator(PrematchLiveInputProvider(prematch_service))
+    prematch_inputs = PrematchLiveInputProvider(prematch_service)
+    scoreboard_names = LockedScoreboardPlayerMatcher(prematch_inputs)
+    live_match = LiveMatchCoordinator(prematch_inputs)
 
     def publish_live_layout(
         positions: dict[str, tuple[float, float]],
@@ -515,8 +532,12 @@ def main() -> None:
         )
 
     def publish_scoreboard(scoreboard: dict[str, object]) -> None:
-        detections.put_scoreboard(scoreboard)
-        live_match.update_scoreboard(scoreboard)
+        try:
+            resolved = scoreboard_names.match(scoreboard)
+        except PrematchDataError:
+            resolved = scoreboard
+        detections.put_scoreboard(resolved)
+        live_match.update_scoreboard(resolved)
 
     live_worker = YoutubeLiveWorker(
         video_analyzer,
@@ -532,6 +553,7 @@ def main() -> None:
         video_analyzer,
         live_worker,
         live_match,
+        scoreboard_names,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(

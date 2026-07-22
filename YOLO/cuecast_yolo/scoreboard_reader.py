@@ -18,12 +18,12 @@ NameRecognizer = Callable[[np.ndarray], str | None]
 
 @dataclass(frozen=True)
 class ScoreboardReading:
-    set_number: int
-    inning: int
-    player1_score: int
-    player2_score: int
-    player1_run: int
-    player2_run: int
+    set_number: int | None
+    inning: int | None
+    player1_score: int | None
+    player2_score: int | None
+    player1_run: int | None
+    player2_run: int | None
     active_color: str | None = None
     row1_color: str | None = None
     player1_name: str | None = None
@@ -757,6 +757,36 @@ class RealtimePbaScoreboardReader:
         self._pending.pop(key, None)
         return True
 
+    def _committed_reading(self) -> ScoreboardReading:
+        assert self.box_white is not None and self.box_yellow is not None
+        row1_color = (
+            "white" if self.box_white[1] < self.box_yellow[1] else "yellow"
+        )
+        row2_color = "yellow" if row1_color == "white" else "white"
+
+        def number(key: str) -> int | None:
+            value = self._committed.get(key)
+            return int(value) if value is not None else None
+
+        return ScoreboardReading(
+            set_number=number("set"),
+            inning=number("inning"),
+            player1_score=number(f"{row1_color}_score"),
+            player2_score=number(f"{row2_color}_score"),
+            player1_run=number(f"{row1_color}_run"),
+            player2_run=number(f"{row2_color}_run"),
+            active_color=str(self._committed["active_color"])
+            if "active_color" in self._committed
+            else None,
+            row1_color=row1_color,
+            player1_name=str(self._committed["player1_name"])
+            if "player1_name" in self._committed
+            else None,
+            player2_name=str(self._committed["player2_name"])
+            if "player2_name" in self._committed
+            else None,
+        )
+
     def sample(self, _frame_number: int, frame: np.ndarray) -> ScoreboardReading | None:
         if not self.enabled:
             return None
@@ -778,7 +808,12 @@ class RealtimePbaScoreboardReader:
         changed = self._signature is None or float(
             np.mean(cv2.absdiff(signature, self._signature))
         ) > 3.5
-        if not (changed or self._pending or self._since_ocr >= self.HEARTBEAT_SAMPLES):
+        if not (
+            changed
+            or self._pending
+            or not self._names_locked
+            or self._since_ocr >= self.HEARTBEAT_SAMPLES
+        ):
             return None
         self._signature = signature
         self._since_ocr = 0
@@ -802,10 +837,6 @@ class RealtimePbaScoreboardReader:
                 else None
             )
             values["inning"] = inning if inning is not None and 0 <= inning <= 99 else None
-            if not self._names_locked:
-                for key, cell in self.NAME_CELLS.items():
-                    if key not in self._committed:
-                        values[key] = self.name_recognizer(self._crop(panel, cell))
 
         active_color = None
         active_run = None
@@ -847,47 +878,38 @@ class RealtimePbaScoreboardReader:
 
         committed_changed = False
         for key, value in values.items():
-            if key in self.NAME_CELLS:
-                confirm = self._confirm_name
-            elif key == "set":
+            if key == "set":
                 confirm = self._confirm_set
             else:
                 confirm = self._confirm
             committed_changed = confirm(key, value) or committed_changed
+
+        # Publish cheap numeric fields before Korean name OCR so names cannot
+        # hold back scores, set, inning, run, or active cue color.
+        if committed_changed:
+            return self._committed_reading()
+
+        names_changed = False
+        scores_ready = all(
+            key in self._committed for key in ("white_score", "yellow_score")
+        )
+        if self.panel_box is not None and scores_ready and not self._names_locked:
+            px, py, pw, ph = self.panel_box
+            panel = frame[py : py + ph, px : px + pw]
+            for key, cell in self.NAME_CELLS.items():
+                if key in self._committed:
+                    continue
+                value = self.name_recognizer(self._crop(panel, cell))
+                names_changed = self._confirm_name(key, value) or names_changed
         if not self._names_locked and all(
             key in self._committed for key in self.NAME_CELLS
         ):
             self._names_locked = True
             for key in self.NAME_CELLS:
                 self._pending.pop(key, None)
-        if not committed_changed:
+        if not names_changed:
             return None
-        required = ("set", "inning", "white_score", "yellow_score")
-        if any(key not in self._committed for key in required):
-            return None
-
-        row1_color = (
-            "white" if self.box_white[1] < self.box_yellow[1] else "yellow"
-        )
-        row2_color = "yellow" if row1_color == "white" else "white"
-        return ScoreboardReading(
-            set_number=int(self._committed["set"]),
-            inning=int(self._committed["inning"]),
-            player1_score=int(self._committed[f"{row1_color}_score"]),
-            player2_score=int(self._committed[f"{row2_color}_score"]),
-            player1_run=int(self._committed.get(f"{row1_color}_run", 0)),
-            player2_run=int(self._committed.get(f"{row2_color}_run", 0)),
-            active_color=str(self._committed.get("active_color"))
-            if "active_color" in self._committed
-            else None,
-            row1_color=row1_color,
-            player1_name=str(self._committed["player1_name"])
-            if "player1_name" in self._committed
-            else None,
-            player2_name=str(self._committed["player2_name"])
-            if "player2_name" in self._committed
-            else None,
-        )
+        return self._committed_reading()
 
 
 class FastPbaCueColorReader(RealtimePbaScoreboardReader):

@@ -24,6 +24,27 @@ class LocalUiTest(unittest.TestCase):
         ):
             self.assertIn(f'id="{element_id}"', self.html)
 
+    def test_player_name_editor_searches_postgres_player_list(self) -> None:
+        self.assertNotIn("<datalist", self.html)
+        self.assertIn('id="player1-name-results"', self.html)
+        self.assertIn('id="player2-name-results"', self.html)
+        self.assertIn('id="player-name-db-status"', self.html)
+        self.assertIn("['PBA','LPBA']", self.html)
+        self.assertIn("active_only=false", self.html)
+        self.assertIn("loadNameEditorPlayers()", self.html)
+        self.assertIn("button.textContent=player.name", self.html)
+        self.assertNotIn("option.label=", self.html)
+        self.assertIn("player1NameSimilarity", self.html)
+        self.assertIn("db_match", self.html)
+
+    def test_stats_player_picker_uses_the_same_search_dropdown(self) -> None:
+        self.assertIn('id="player-a-results"', self.html)
+        self.assertIn('id="player-b-results"', self.html)
+        self.assertIn(
+            "bindPlayerSearch('player-a','player-a-results'", self.html
+        )
+        self.assertIn("dataset.playerCode", self.html)
+
     def test_cuecast_logo_is_used_in_the_site_header(self) -> None:
         self.assertTrue(LOGO.is_file())
         self.assertTrue(FAVICON.is_file())
@@ -31,8 +52,10 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn('src="/assets/logo.png"', self.html)
         self.assertIn('rel="icon" type="image/png" href="/assets/home.png"', self.html)
 
-    def test_manual_names_are_saved_per_youtube_video(self) -> None:
-        self.assertIn("cuecast-player-names:${id}", self.html)
+    def test_manual_names_are_kept_only_for_the_current_session(self) -> None:
+        self.assertNotIn("cuecast-player-names:", self.html)
+        self.assertNotIn("loadManualPlayerNames", self.html)
+        self.assertNotIn("saveManualPlayerNames", self.html)
         self.assertIn("scoreboard.player1Name", self.html)
         self.assertIn("manualPlayerNames||lastDetectedPlayerNames", self.html)
         self.assertIn("/api/v1/live-match/players", self.html)
@@ -44,6 +67,8 @@ class LocalUiTest(unittest.TestCase):
     def test_scoreboard_keeps_set_and_hides_inning(self) -> None:
         self.assertIn('id="scoreboard-set"', self.html)
         self.assertNotIn('id="scoreboard-inning"', self.html)
+        self.assertIn("scoreboard[field]!==null", self.html)
+        self.assertNotIn("String(scoreboard.set)", self.html)
 
     def test_scoreboard_can_be_reset_for_fresh_ocr(self) -> None:
         self.assertIn('id="refresh-scoreboard"', self.html)

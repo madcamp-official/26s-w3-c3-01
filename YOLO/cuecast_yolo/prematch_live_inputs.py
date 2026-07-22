@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
+from threading import Lock
 from time import monotonic
 import unicodedata
 
@@ -9,6 +11,86 @@ from .prematch_probability import PrematchDataError, PrematchService
 def normalize_broadcast_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     return "".join(character for character in normalized if character.isalnum())
+
+
+def broadcast_name_similarity(ocr_name: str, db_name: str) -> float:
+    """Return a character-level score suitable for short Korean broadcast names."""
+    target = normalize_broadcast_name(ocr_name)
+    candidate = normalize_broadcast_name(db_name)
+    if not target or not candidate:
+        return 0.0
+    if target == candidate:
+        return 1.0
+    if candidate in target:
+        return max(0.9, len(candidate) / len(target))
+    if target in candidate:
+        return max(0.82, len(target) / len(candidate))
+
+    def windowed_ratio(left: str, right: str) -> float:
+        global_score = SequenceMatcher(None, left, right).ratio()
+        if len(left) <= len(right):
+            return global_score
+        window_score = max(
+            SequenceMatcher(None, left[index : index + len(right)], right).ratio()
+            for index in range(len(left) - len(right) + 1)
+        )
+        return max(global_score, window_score)
+
+    character_score = windowed_ratio(target, candidate)
+    jamo_score = windowed_ratio(
+        unicodedata.normalize("NFD", target),
+        unicodedata.normalize("NFD", candidate),
+    )
+    return max(character_score, jamo_score)
+
+
+class LockedScoreboardPlayerMatcher:
+    """Keep the first confident DB match until the scoreboard is explicitly reset."""
+
+    def __init__(self, provider: "PrematchLiveInputProvider") -> None:
+        self.provider = provider
+        self._lock = Lock()
+        self._generation = 0
+        self._fixed: dict[str, dict[str, object]] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._fixed = {}
+
+    def match(self, scoreboard: dict[str, object]) -> dict[str, object]:
+        with self._lock:
+            generation = self._generation
+            fixed_before = dict(self._fixed)
+        if len(fixed_before) == 2:
+            return self._apply_fixed(scoreboard, fixed_before)
+
+        resolved = self.provider.match_scoreboard_players(scoreboard)
+        with self._lock:
+            if generation != self._generation:
+                return dict(scoreboard)
+            for number in ("1", "2"):
+                field = f"player{number}Name"
+                if field in self._fixed:
+                    continue
+                if resolved.get(f"player{number}NameSimilarity") is None:
+                    continue
+                self._fixed[field] = {
+                    key: value
+                    for key, value in resolved.items()
+                    if key == field or key.startswith(f"player{number}")
+                }
+            fixed = dict(self._fixed)
+        return self._apply_fixed(resolved, fixed)
+
+    @staticmethod
+    def _apply_fixed(
+        scoreboard: dict[str, object], fixed: dict[str, dict[str, object]]
+    ) -> dict[str, object]:
+        result = dict(scoreboard)
+        for payload in fixed.values():
+            result.update(payload)
+        return result
 
 
 class PrematchLiveInputProvider:
@@ -65,6 +147,69 @@ class PrematchLiveInputProvider:
         raise PrematchDataError(
             f"경기 전 DB에서 두 선수를 찾을 수 없습니다: {player_a}, {player_b}"
         )
+
+    def match_scoreboard_players(
+        self,
+        scoreboard: dict[str, object],
+        *,
+        minimum_similarity: float = 0.5,
+    ) -> dict[str, object]:
+        """Replace OCR names with the closest distinct DB players from one league."""
+        fields = ("player1Name", "player2Name")
+        raw_names = {
+            field: str(scoreboard.get(field) or "").strip()
+            for field in fields
+            if str(scoreboard.get(field) or "").strip()
+        }
+        if not raw_names:
+            return dict(scoreboard)
+
+        best: tuple[float, str, dict[str, tuple[dict[str, object], float]]] | None = None
+        for league in ("PBA", "LPBA"):
+            players = self._players(league)
+            rankings: dict[str, list[tuple[dict[str, object], float]]] = {}
+            for field, raw_name in raw_names.items():
+                rankings[field] = sorted(
+                    (
+                        (player, broadcast_name_similarity(raw_name, str(player["name"])))
+                        for player in players
+                    ),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:5]
+            if any(not ranked for ranked in rankings.values()):
+                continue
+
+            choices: list[dict[str, tuple[dict[str, object], float]]]
+            if len(rankings) == 1:
+                field = next(iter(rankings))
+                choices = [{field: rankings[field][0]}]
+            else:
+                first, second = fields
+                choices = [
+                    {first: left, second: right}
+                    for left in rankings[first]
+                    for right in rankings[second]
+                    if str(left[0]["code"]) != str(right[0]["code"])
+                ]
+            for choice in choices:
+                score = sum(item[1] for item in choice.values()) / len(choice)
+                if best is None or score > best[0]:
+                    best = (score, league, choice)
+
+        matched = dict(scoreboard)
+        if best is None:
+            return matched
+        _, league, choices = best
+        for field, (player, similarity) in choices.items():
+            if similarity < minimum_similarity:
+                continue
+            number = "1" if field == "player1Name" else "2"
+            matched[f"player{number}OcrName"] = raw_names[field]
+            matched[f"player{number}NameSimilarity"] = round(similarity, 3)
+            matched[f"player{number}League"] = league
+            matched[field] = str(player["name"])
+        return matched
 
     def fetch(
         self,

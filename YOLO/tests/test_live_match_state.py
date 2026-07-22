@@ -59,6 +59,33 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
         ready = coordinator.update_shot(0.62, "white")
         self.assertEqual(ready["state"], "ready")
 
+    def test_partial_scoreboard_fields_are_merged_without_waiting_for_inning(self) -> None:
+        coordinator = LiveMatchCoordinator(_Provider())
+
+        waiting = coordinator.update_scoreboard(
+            {
+                "player1Score": 4,
+                "player2Score": 3,
+                "row1Color": "white",
+            }
+        )
+        self.assertEqual(waiting["state"], "waiting")
+        self.assertIn("세트", waiting["detail"])
+
+        coordinator.update_scoreboard(
+            {
+                "set": 1,
+                "player1Name": "김영원",
+                "player2Name": "김규준",
+                "activeColor": "white",
+            }
+        )
+        ready = coordinator.update_shot(0.62, "white")
+
+        self.assertEqual(ready["state"], "ready")
+        self.assertEqual(ready["result"]["inputs"]["scoreA"], 4)
+        self.assertEqual(ready["result"]["inputs"]["scoreB"], 3)
+
     def test_uses_server_db_player_avg_in_result(self) -> None:
         provider = _Provider()
         coordinator = LiveMatchCoordinator(provider)

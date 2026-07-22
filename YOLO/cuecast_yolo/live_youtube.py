@@ -183,13 +183,20 @@ class YoutubeLiveWorker:
     def _accept_scoreboard(
         self, reading: ScoreboardReading, timestamp: float
     ) -> None:
-        scoreboard = {
-            **reading.to_dict(),
-            "detectedAtSeconds": timestamp,
+        update = {
+            key: value
+            for key, value in reading.to_dict().items()
+            if value is not None
         }
-        active_color = reading.active_color
         shooter_changed = False
         with self._lock:
+            previous = self._status.get("scoreboard")
+            scoreboard = {
+                **(previous if isinstance(previous, dict) else {}),
+                **update,
+                "detectedAtSeconds": timestamp,
+            }
+            active_color = scoreboard.get("activeColor")
             if active_color in ("white", "yellow"):
                 if not self._shooter_confirmed or self._shooter != active_color:
                     shooter_changed = True
@@ -265,16 +272,27 @@ class YoutubeLiveWorker:
         analysis["shooterRefresh"] = True
         self.callback(positions, shooter, analysis)
 
+    def _open_capture(self, source: str):
+        video = self.analyzer.resolve(source)
+        capture = cv2.VideoCapture(video.media_url)
+        if capture.isOpened() or video.source_kind != "youtube":
+            return video, capture
+        capture.release()
+        self.analyzer.invalidate_resolved_source(source)
+        video = self.analyzer.resolve(source)
+        return video, cv2.VideoCapture(video.media_url)
+
     def _run(self, source: str, start_seconds: float, stop_event: Event) -> None:
         capture = None
         scoreboard_stop = Event()
         scoreboard_thread: Thread | None = None
         cue_color_thread: Thread | None = None
         try:
-            video = self.analyzer.resolve(source)
-            capture = cv2.VideoCapture(video.media_url)
+            video, capture = self._open_capture(source)
             if not capture.isOpened():
-                raise RuntimeError("YouTube 분석 스트림을 열 수 없습니다")
+                raise RuntimeError(
+                    "YouTube 분석 스트림을 새 주소로 재시도했지만 열 수 없습니다"
+                )
             fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
             step = max(1, round(fps / max(self.sample_fps, 0.1)))
             frame_number = max(0, round(start_seconds * fps))
@@ -379,7 +397,11 @@ class YoutubeLiveWorker:
                     big_jump = abs(target_frame - frame_number) > fps * 2
                     if big_jump:
                         capture.release()
-                        capture = cv2.VideoCapture(video.media_url)
+                        video, capture = self._open_capture(source)
+                        if not capture.isOpened():
+                            raise RuntimeError(
+                                "YouTube 탐색 후 분석 스트림을 다시 열 수 없습니다"
+                            )
                         # 탐색 후엔 카메라 구도가 달라질 수 있으니 테이블 기준도 재획득.
                         self.analyzer.reset_tracking()
                     frame_number = target_frame

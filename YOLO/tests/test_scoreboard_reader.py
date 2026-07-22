@@ -164,15 +164,42 @@ class PbaScoreboardReaderTest(unittest.TestCase):
             patch.object(reader, "_read_circle", side_effect=circle),
         ):
             self.assertIsNone(reader.sample(1, frame))
-            self.assertIsNone(reader.sample(2, frame))
+            scores = reader.sample(2, frame)
             self.assertIsNone(reader.sample(3, frame))
             result = reader.sample(4, frame)
 
+        self.assertEqual(scores.player1_score, 5)
+        self.assertEqual(scores.player2_score, 2)
+        self.assertIsNone(scores.set_number)
         self.assertEqual(
             result,
-            ScoreboardReading(1, 3, 5, 2, 2, 0, "white", "white"),
+            ScoreboardReading(1, 3, 5, 2, 2, None, "white", "white"),
         )
         self.assertEqual(reader._committed["inning"], 3)
+
+    def test_realtime_reader_publishes_scores_without_inning(self) -> None:
+        reader = RealtimePbaScoreboardReader(
+            _SequenceRecognizer([]),
+            _SequenceRecognizer([1, None, 1, None]),
+            lambda _image: None,
+        )
+        reader.box_white = (70, 30, 11, 14)
+        reader.box_yellow = (70, 44, 11, 14)
+        reader.panel_box = (0, 0, 100, 60)
+        frame = np.full((80, 120, 3), 128, np.uint8)
+
+        with patch.object(
+            reader,
+            "_read_colored",
+            side_effect=lambda _frame, _box, color: 5 if color == "white" else 2,
+        ):
+            self.assertIsNone(reader.sample(1, frame))
+            result = reader.sample(2, frame)
+
+        self.assertEqual(result.player1_score, 5)
+        self.assertEqual(result.player2_score, 2)
+        self.assertIsNone(result.inning)
+        self.assertIsNone(result.set_number)
 
     def test_realtime_reader_requires_three_matching_name_reads(self) -> None:
         name_recognizer = _SequenceNameRecognizer(
@@ -180,7 +207,7 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         )
         reader = RealtimePbaScoreboardReader(
             _SequenceRecognizer([]),
-            _SequenceRecognizer([1, 3, 1, 3, 1, 3, 1, 3, 1, 3]),
+            _SequenceRecognizer([1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]),
             name_recognizer,
         )
         reader.box_white = (70, 30, 11, 14)
@@ -202,13 +229,19 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         ):
             first = reader.sample(1, frame)
             second = reader.sample(2, frame)
+            name_calls_when_scores_publish = name_recognizer.calls
             third = reader.sample(3, frame)
-            result = reader.sample(4, frame)
-            after_lock = reader.sample(5, frame)
+            set_result = reader.sample(4, frame)
+            fifth = reader.sample(5, frame)
+            result = reader.sample(6, frame)
+            after_lock = reader.sample(7, frame)
 
         self.assertIsNone(first)
-        self.assertIsNone(second)
+        self.assertIsNotNone(second)
+        self.assertEqual(name_calls_when_scores_publish, 0)
         self.assertIsNone(third)
+        self.assertEqual(set_result.set_number, 1)
+        self.assertIsNone(fifth)
         self.assertEqual(result.player1_name, "김영원")
         self.assertEqual(result.player2_name, "김재근")
         self.assertTrue(reader.names_locked)
@@ -250,7 +283,9 @@ class PbaScoreboardReaderTest(unittest.TestCase):
                 result = reader.sample(index, frame)
                 (rejected if index <= 4 else accepted).append(result)
 
-        self.assertTrue(all(result is None for result in rejected))
+        self.assertTrue(
+            all(result is None or result.set_number is None for result in rejected)
+        )
         self.assertEqual(accepted[-1].set_number, 3)
 
 

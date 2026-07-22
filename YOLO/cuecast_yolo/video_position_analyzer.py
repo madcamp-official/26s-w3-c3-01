@@ -208,6 +208,11 @@ class VideoPositionAnalyzer:
             self._cache[source] = (monotonic(), resolved)
         return resolved
 
+    def invalidate_resolved_source(self, source: str) -> None:
+        """Discard a cached CDN URL after the media backend fails to open it."""
+        with self._cache_lock:
+            self._cache.pop(source, None)
+
     def detect_frame(
         self, frame: np.ndarray
     ) -> tuple[dict[str, tuple[float, float]], float] | None:
