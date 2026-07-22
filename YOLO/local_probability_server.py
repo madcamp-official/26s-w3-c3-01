@@ -150,6 +150,15 @@ class DetectionStore:
             self._scoreboard = {}
             return {"scoreboard": None}
 
+    def reset_scoreboard_scores(self) -> dict[str, object]:
+        with self._lock:
+            previous = self._scoreboard.get("scoreboard")
+            refreshed = dict(previous) if isinstance(previous, dict) else {}
+            for key in ("player1Score", "player2Score", "player1Run", "player2Run"):
+                refreshed[key] = None
+            self._scoreboard = {"scoreboard": refreshed}
+            return dict(self._scoreboard)
+
     def get(self) -> dict[str, object]:
         with self._lock:
             return {
@@ -161,7 +170,9 @@ class DetectionStore:
     def clear(self) -> dict[str, object]:
         with self._lock:
             self._version += 1
-            self._confirmed_version = 0
+            # Keep this counter monotonic across pause/resume and stream restarts.
+            # The browser compares confirmedVersion with its last seen value; a
+            # reset to zero made every post-restart result look stale.
             self._confirmed = {}
             self._scoreboard = {}
             self._value = {"version": self._version, "pending": True}
@@ -406,9 +417,8 @@ def create_handler(
                     )
                     return
                 if path == "/api/v1/youtube/live/scoreboard/reset":
-                    scoreboard_names.reset()
-                    live_worker.reset_scoreboard()
-                    detections.clear_scoreboard()
+                    live_worker.reset_scoreboard_scores()
+                    detections.reset_scoreboard_scores()
                     self._send_json(live_worker.status())
                     return
                 self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)

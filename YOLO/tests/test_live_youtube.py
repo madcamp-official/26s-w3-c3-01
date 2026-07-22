@@ -109,6 +109,37 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         self.assertIsNone(status["scoreboard"])
         self.assertFalse(status["shooterConfirmed"])
 
+    def test_score_refresh_preserves_names_and_shooter(self) -> None:
+        reader = MagicMock()
+        reader.enabled = True
+        worker = YoutubeLiveWorker(
+            VideoPositionAnalyzer(), lambda *_: None, scoreboard_reader=reader
+        )
+        worker._status.update(
+            scoreboardDetected=True,
+            scoreboard={
+                "player1Name": "김영원",
+                "player2Name": "김재근",
+                "player1Score": 5,
+                "player2Score": 3,
+                "player1Run": 2,
+                "player2Run": None,
+            },
+            shooterConfirmed=True,
+            shooterSource="manual",
+        )
+        worker._shooter_confirmed = True
+
+        worker.reset_scoreboard_scores()
+
+        reader.reset_scores_and_runs.assert_called_once_with()
+        status = worker.status()
+        self.assertEqual(status["scoreboard"]["player1Name"], "김영원")
+        self.assertEqual(status["scoreboard"]["player2Name"], "김재근")
+        self.assertIsNone(status["scoreboard"]["player1Score"])
+        self.assertIsNone(status["scoreboard"]["player2Run"])
+        self.assertTrue(status["shooterConfirmed"])
+
     def test_fast_scoreboard_color_confirms_shooter_before_full_ocr(self) -> None:
         layout_callback = MagicMock()
         worker = YoutubeLiveWorker(VideoPositionAnalyzer(), layout_callback)

@@ -36,8 +36,8 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("loadNameEditorPlayers", self.html)
         self.assertIn("button.textContent=player.name", self.html)
         self.assertNotIn("option.label=", self.html)
-        self.assertIn("player1NameSimilarity", self.html)
-        self.assertIn("db_match", self.html)
+        self.assertNotIn("player1NameSimilarity", self.html)
+        self.assertNotIn("db_match", self.html)
 
     def test_stats_player_picker_uses_the_same_search_dropdown(self) -> None:
         self.assertIn('id="player-a-results"', self.html)
@@ -69,13 +69,13 @@ class LocalUiTest(unittest.TestCase):
         self.assertNotIn("cuecast-player-names:", self.html)
         self.assertNotIn("loadManualPlayerNames", self.html)
         self.assertNotIn("saveManualPlayerNames", self.html)
-        self.assertIn("scoreboard.player1Name", self.html)
-        self.assertIn("manualPlayerNames||lastDetectedPlayerNames", self.html)
+        self.assertNotIn("scoreboard.player1Name", self.html)
+        self.assertIn("manualPlayerNames=names", self.html)
         self.assertIn("/api/v1/live-match/players", self.html)
 
     def test_youtube_title_is_not_used_as_player_name_fallback(self) -> None:
         self.assertNotIn("playerNamesFromTitle", self.html)
-        self.assertIn("이름 인식 중", self.html)
+        self.assertIn('placeholder="선수 이름 검색"', self.html)
 
     def test_scoreboard_hides_set_and_inning(self) -> None:
         self.assertNotIn('id="scoreboard-set"', self.html)
@@ -91,7 +91,9 @@ class LocalUiTest(unittest.TestCase):
     def test_scoreboard_can_be_reset_for_fresh_ocr(self) -> None:
         self.assertIn('id="refresh-scoreboard"', self.html)
         self.assertIn('/api/v1/youtube/live/scoreboard/reset', self.html)
-        self.assertIn("clearScoreboardDisplay()", self.html)
+        self.assertIn("button.textContent='인식 중';clearScoreboardScores()", self.html)
+        self.assertNotIn("button.textContent='인식 중';manualPlayerNames=null", self.html)
+        self.assertNotIn("clearScoreboardScores();shooterConfirmed=false", self.html)
 
     def test_cue_ball_can_be_selected_manually(self) -> None:
         self.assertIn('<button class="segment active" id="white"', self.html)
@@ -101,19 +103,33 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("selectShooter('yellow')", self.html)
         self.assertIn("acceptDetectedShooter(s.shooterConfirmed?s.shooter:null)", self.html)
 
-    def test_confirmed_shots_are_saved_when_balls_stop(self) -> None:
+    def test_only_precisely_stopped_probability_is_saved_to_shot_history(self) -> None:
         self.assertIn('id="shot-history-list"', self.html)
         self.assertIn('id="clear-shot-history"', self.html)
         self.assertIn("cuecast-shot-history:${id}", self.html)
-        self.assertIn("recordConfirmedShot(d)", self.html)
-        self.assertIn("data.confirmedAnalysis?.confirmed!==true", self.html)
-        self.assertIn("data.confirmedAnalysis?.shooterRefresh", self.html)
-        self.assertIn("trigger:'ball_stop'", self.html)
+        self.assertIn("recordStoppedShot(d)", self.html)
+        self.assertIn("analysis?.layoutSource!=='stopped'", self.html)
+        self.assertIn("analysis?.shooterRefresh", self.html)
+        self.assertIn("trigger:'stopped_0.3s'", self.html)
+        self.assertIn("data.confirmedVersion", self.html)
+        self.assertNotIn("recordProbabilityShot(d)", self.html)
+        self.assertNotIn("recordConfirmedShot(d)", self.html)
         self.assertNotIn("stageConfirmedShot", self.html)
+        self.assertNotIn("recordPendingShotOnMovement", self.html)
         self.assertNotIn("observeShotCompletion", self.html)
         self.assertNotIn("scoreChanged||turnChanged", self.html)
-        self.assertNotIn("pendingShotRecord", self.html)
         self.assertIn("data.confirmedBefore", self.html)
+
+    def test_individual_shot_history_records_can_be_deleted(self) -> None:
+        self.assertIn("function deleteShotRecord(id)", self.html)
+        self.assertIn("className='history-delete'", self.html)
+        self.assertIn("remove.onclick=()=>deleteShotRecord(shot.id)", self.html)
+
+    def test_scoreboard_player_search_dropdown_is_opaque(self) -> None:
+        self.assertIn(".player-search-results{", self.html)
+        self.assertIn("background:#fff", self.html)
+        self.assertIn("opacity:1", self.html)
+        self.assertNotIn('.scoreboard-live[data-ready="false"]{opacity:', self.html)
 
     def test_shot_panel_uses_similar_shot_count_instead_of_confidence(self) -> None:
         self.assertIn("<span>유사 샷 개수</span>", self.html)

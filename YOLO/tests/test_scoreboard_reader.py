@@ -228,6 +228,33 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         self.assertIsNone(regressed)
         self.assertEqual(reader._committed["white_score"], 2)
 
+    def test_score_refresh_keeps_names_set_and_active_color(self) -> None:
+        reader = RealtimePbaScoreboardReader(_SequenceRecognizer([]))
+        reader._committed = {
+            "set": 2,
+            "player1_name": "김영원",
+            "player2_name": "김재근",
+            "active_color": "white",
+            "white_score": 5,
+            "yellow_score": 3,
+            "player1_run": 2,
+            "active_run_player": 1,
+        }
+
+        reader.reset_scores_and_runs()
+
+        self.assertEqual(reader._committed["set"], 2)
+        self.assertEqual(reader._committed["player1_name"], "김영원")
+        self.assertEqual(reader._committed["active_color"], "white")
+        for key in (
+            "white_score",
+            "yellow_score",
+            "player1_run",
+            "player2_run",
+            "active_run_player",
+        ):
+            self.assertNotIn(key, reader._committed)
+
     def test_two_detected_run_rows_are_hidden_and_force_recheck(self) -> None:
         reader = RealtimePbaScoreboardReader(_SequenceRecognizer([]))
         reader.box_white = (70, 30, 11, 14)

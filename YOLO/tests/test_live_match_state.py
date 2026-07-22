@@ -47,7 +47,7 @@ def _scoreboard(**overrides: object) -> dict[str, object]:
 
 
 class LiveMatchCoordinatorTest(unittest.TestCase):
-    def test_waits_until_scoreboard_names_and_shot_probability_exist(self) -> None:
+    def test_waits_until_manual_names_and_shot_probability_exist(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
         self.assertEqual(
             coordinator.update_scoreboard(
@@ -56,11 +56,14 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
             "waiting",
         )
         self.assertEqual(coordinator.update_scoreboard(_scoreboard())["state"], "waiting")
+        self.assertEqual(coordinator.update_shot(0.62, "white")["state"], "waiting")
+        coordinator.set_player_names("김영원", "김재근")
         ready = coordinator.update_shot(0.62, "white")
         self.assertEqual(ready["state"], "ready")
 
     def test_partial_scoreboard_fields_are_merged_without_waiting_for_inning(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
+        coordinator.set_player_names("김영원", "김규준")
 
         waiting = coordinator.update_scoreboard(
             {
@@ -89,6 +92,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
     def test_uses_server_db_player_avg_in_result(self) -> None:
         provider = _Provider()
         coordinator = LiveMatchCoordinator(provider)
+        coordinator.set_player_names("김영원", "김규준")
         coordinator.update_scoreboard(_scoreboard())
         status = coordinator.update_shot(0.62, "white")
         result = status["result"]
@@ -99,6 +103,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
 
     def test_score_change_invalidates_previous_layout_probability(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
+        coordinator.set_player_names("김영원", "김규준")
         coordinator.update_scoreboard(_scoreboard())
         self.assertEqual(coordinator.update_shot(0.62, "white")["state"], "ready")
         status = coordinator.update_scoreboard(_scoreboard(player1Score=5))
@@ -107,6 +112,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
 
     def test_set_transition_tracks_winner_seen_in_current_session(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
+        coordinator.set_player_names("김영원", "김규준")
         coordinator.update_scoreboard(_scoreboard(player1Score=15, player2Score=11))
         coordinator.update_shot(0.6, "white")
         coordinator.update_scoreboard(
@@ -118,6 +124,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
 
     def test_mid_match_start_is_marked_provisional(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
+        coordinator.set_player_names("김영원", "김규준")
         coordinator.update_scoreboard(_scoreboard(set=3))
         ready = coordinator.update_shot(0.55, "white")
         self.assertTrue(ready["result"]["setScoreProvisional"])
@@ -125,6 +132,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
 
     def test_skipped_set_numbers_are_marked_unknown(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
+        coordinator.set_player_names("김영원", "김규준")
         coordinator.update_scoreboard(_scoreboard(player1Score=15, player2Score=11))
         coordinator.update_scoreboard(
             _scoreboard(set=3, player1Score=0, player2Score=0)

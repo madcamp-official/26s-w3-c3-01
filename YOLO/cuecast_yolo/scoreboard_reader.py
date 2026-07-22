@@ -519,6 +519,22 @@ class RealtimePbaScoreboardReader:
         self._committed: dict[str, object] = {}
         self._names_locked = False
 
+    def reset_scores_and_runs(self) -> None:
+        """Forget only score/run OCR decisions while preserving names and layout."""
+        keys = (
+            "white_score",
+            "yellow_score",
+            "player1_run",
+            "player2_run",
+            "active_run_player",
+            "run_recheck",
+        )
+        for key in keys:
+            self._committed.pop(key, None)
+            self._pending.pop(key, None)
+        self._signature = None
+        self._since_ocr = self.HEARTBEAT_SAMPLES
+
     @property
     def locked(self) -> bool:
         return self.box_white is not None and self.box_yellow is not None

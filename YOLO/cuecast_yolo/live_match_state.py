@@ -152,7 +152,7 @@ class LiveMatchCoordinator:
             scoreboard.get("player2Name"),
         )
         if not all(isinstance(name, str) and name.strip() for name in names):
-            return self._waiting("선수 이름 OCR 대기 중")
+            return self._waiting("선수 이름 입력 대기 중")
         set_number = int(scoreboard.get("set", 1))
         try:
             db_inputs = self.provider.fetch(
@@ -187,6 +187,10 @@ class LiveMatchCoordinator:
             "prematchSource": db_inputs.get("prematchSource", "dummy"),
             "dataSource": db_inputs.get("dataSource", "server_db"),
         }
+        if self._manual_names is None:
+            return self._waiting(
+                "선수 이름 입력 대기 중", prematch=prematch_preview
+            )
         if self._shot_probability is None:
             return self._waiting(
                 "현재 포메이션 성공률 대기 중", prematch=prematch_preview

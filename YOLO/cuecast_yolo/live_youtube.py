@@ -140,6 +140,20 @@ class YoutubeLiveWorker:
                 shooterSource=None,
             )
 
+    def reset_scoreboard_scores(self) -> None:
+        """Refresh score and run OCR without changing names or cue-ball state."""
+        with self._scoreboard_lock:
+            self.scoreboard_reader.reset_scores_and_runs()
+        with self._lock:
+            scoreboard = self._status.get("scoreboard")
+            refreshed = dict(scoreboard) if isinstance(scoreboard, dict) else {}
+            for key in ("player1Score", "player2Score", "player1Run", "player2Run"):
+                refreshed[key] = None
+            self._status.update(
+                scoreboard=refreshed or None,
+                lastScoreboardSeconds=None,
+            )
+
     def _accept_fast_shooter(self, shooter: str, timestamp: float) -> None:
         changed = False
         with self._lock:
