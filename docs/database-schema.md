@@ -143,3 +143,77 @@ OCR 이름이나 다양한 표기를 선수 코드에 연결합니다.
 2026 시즌 시작 직전의 선수별 고정 스냅샷입니다.
 
 주요 데이터 묶음:
+
+- `elo_start`, `elo_matches_prior`
+- 통산 경기·승·패와 보정 승률
+- 최근 5경기·10경기 보정 승률과 coverage
+- 과거 상세 기록 이닝 수와 신뢰도
+- `AVG`, `TS`, `BRS`, `5HS`, `HR` 원본·축소 추정값
+- 표준화 z-score와 `performance_q_start`
+- 2026 시즌 시작값과 최종 결합 지표
+
+**Primary Key:** `player_code`
+
+### 4.4 `cuecast.league_metric_baselines`
+
+선수 세부 경기력 표준화를 위한 리그별 평균과 표준편차입니다.
+
+**Primary Key:** `(league, metric)`
+
+사용 지표:
+
+- `AVG`
+- `TS`
+- `BRS`
+- `5HS`
+- `HR`
+
+### 4.5 `cuecast.recent_match_events_seed`
+
+2026 시즌 개막 시 최근 경기 rolling window를 시작하기 위한 과거 이벤트입니다.
+
+**Primary Key:** `(league, player_code, recent_rank)`
+
+최근 경기 날짜, 상대, 결과, 대회와 라운드를 보존합니다.
+
+### 4.6 `cuecast.head_to_head_reference`
+
+두 선수의 과거 상대 전적을 저장합니다.
+
+**Primary Key:** `(player_a_code, player_b_code)`
+
+`included_in_final_probability`는 현재 모델에서 상대 전적이 최종 확률에 포함되는지를 명시합니다. 현재 경기 전 모델에서는 참고 표시만 하므로 `false`가 원칙입니다.
+
+### 4.7 `cuecast.season_player_state`
+
+2026 시즌 경기 결과가 들어올 때 계속 갱신되는 mutable 선수 상태입니다.
+
+주요 컬럼:
+
+- `elo_current`, `elo_matches_total`
+- 시즌 경기·승·패와 보정 승률
+- 누적 이닝, AVG
+- 전체 시도·성공, TS
+- 브레이크 시도·성공, BRS
+- 5점 이상 샷, 5HS
+- 최고 연속 득점, HR
+- 최근 상세 경기 최대 5개 집계 상태
+
+**Primary Key:** `player_code`
+
+### 4.8 `cuecast.matches`
+
+과거 경기와 2026 시즌 경기를 통합 저장합니다.
+
+| 주요 컬럼 | 설명 |
+|---|---|
+| `match_uid` | 경기 고유 ID, PK |
+| `league`, `season_code` | 리그와 시즌 |
+| `tournament_*`, `round_*` | 대회와 라운드 |
+| `player1_code`, `player2_code` | 두 선수 코드 |
+| `player1_set_score`, `player2_set_score` | 최종 세트 스코어 |
+| `winner_code`, `loser_code` | 승자·패자 |
+| `is_walkover`, `is_played` | 부전승과 실제 경기 여부 |
+| `model_eligible` | 모델 입력 사용 가능 여부 |
+
+### 4.9 `cuecast.player_match_detail_stats`
