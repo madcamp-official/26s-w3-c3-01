@@ -217,3 +217,78 @@ OCR 이름이나 다양한 표기를 선수 코드에 연결합니다.
 | `model_eligible` | 모델 입력 사용 가능 여부 |
 
 ### 4.9 `cuecast.player_match_detail_stats`
+
+한 경기의 선수 한 명 기준 세부 기록입니다.
+
+**Primary Key:** `(match_uid, player_code)`
+
+주요 기록:
+
+- 세트별 득점 `pts_by_set`
+- 득점 `pts`, 이닝 `inn`, 평균 `avg`, 최고 연속 득점 `high_run`
+- 전체 시도·성공과 성공률
+- 5점 이상 샷 수와 비율
+- 브레이크 시도·성공과 성공률
+- `mapping_status`, `identity_match_method`, `mapping_score`
+
+`mapping_status`가 불명확하거나 원본 점수 합이 맞지 않는 기록은 점수 관련 컬럼을 `NULL` 처리하거나 모델 대상에서 제외해야 합니다.
+
+---
+
+## 5. `prematch_*` 서비스용 투영 데이터
+
+현재 `PostgresPrematchRepository`는 이 테이블을 직접 조회합니다. 따라서 경기 전 API 운영에는 `prematch_*` 적재가 필요합니다.
+
+### 5.1 `prematch_players`
+
+| 컬럼 | 설명 |
+|---|---|
+| PK | `(league, player_code)` |
+| `player_name`, `player_name_short` | UI 검색 이름 |
+| `active_roster` | 활성 선수 필터 |
+| `image_*` | 이미지 바이너리와 MIME 타입 |
+| `image_is_placeholder` | 대체 이미지 여부 |
+
+### 5.2 `prematch_player_features`
+
+최신 시점별 경기 전 계산용 스냅샷입니다.
+
+| 데이터 | 컬럼 |
+|---|---|
+| 식별 | `snapshot_at`, `league`, `season_code`, `player_code` |
+| Elo | `elo` |
+| 통산 | `career_matches`, `career_wins` |
+| 시즌 | `season_matches`, `season_wins` |
+| 최근 | `last5_*`, `last10_*` |
+| 경기력 | `performance_score`, `performance_innings_total`, `metrics JSONB` |
+
+**Primary Key:** `(snapshot_at, league, player_code)`
+
+서비스는 같은 선수·리그·시즌에서 가장 최근 `snapshot_at`을 사용합니다.
+
+### 5.3 `prematch_head_to_head`
+
+두 선수의 상대 전적 참고 정보입니다.
+
+**Primary Key:** `(league, player_a_code, player_b_code)`
+
+최종 확률에는 반영하지 않고 화면 설명에만 사용합니다.
+
+### 5.4 `prematch_league_metric_baselines`
+
+지표 표준화 기준을 시점별로 저장합니다.
+
+**Primary Key:** `(snapshot_at, league, metric)`
+
+---
+
+## 6. 스키마 간 매핑
+
+| `cuecast` 원본·운영 | `prematch` 서비스 |
+|---|---|
+| `player_master` | `prematch_players` |
+| `player_runtime_state` + `season_player_state` | `prematch_player_features` |
+| `head_to_head_reference` | `prematch_head_to_head` |
+| `league_metric_baselines` | `prematch_league_metric_baselines` |
+
+### 권장 갱신 순서
