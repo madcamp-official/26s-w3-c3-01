@@ -298,3 +298,79 @@ GET /api/v1/prematch/players?league=PBA&active_only=true
 #### 응답 대표 필드
 
 ```json
+{
+  "successProbability": 0.426,
+  "difficulty": "보통",
+  "confidence": "medium",
+  "roles": {
+    "cue": "white",
+    "object1": "red",
+    "object2": "yellow"
+  },
+  "dataRecords": 842
+}
+```
+
+실제 응답에는 모델 구성 확률, 유사 배치, Grid, 좌표 민감도와 설명 필드가 추가될 수 있습니다.
+
+---
+
+### 6.2 `POST /api/v1/detection`
+
+외부 검출기가 전달한 배치를 계산하고 최신 detection store에 저장합니다.
+
+#### 요청
+
+`/api/v1/shot-probability`와 같은 좌표 형식을 사용합니다.
+
+#### 응답
+
+HTTP `201`과 함께 최신 `version`, `before`, `shooter`, `prediction`을 반환합니다.
+
+---
+
+### 6.3 `GET /api/v1/detection/latest`
+
+최신 공 배치, 확정 결과, 점수판과 샷 성공률을 조회합니다.
+
+#### 응답 주요 필드
+
+```json
+{
+  "version": 14,
+  "before": {
+    "white": [0.55, 0.91],
+    "yellow": [0.23, 0.70],
+    "red": [0.96, 0.34]
+  },
+  "shooter": "white",
+  "prediction": {},
+  "confirmedVersion": 8,
+  "confirmedBefore": {},
+  "confirmedPrediction": {},
+  "confirmedShooter": "white",
+  "analysis": {
+    "confirmed": true,
+    "layoutSource": "stopped"
+  },
+  "scoreboard": {
+    "player1Score": 4,
+    "player2Score": 3,
+    "activeColor": "white"
+  }
+}
+```
+
+`confirmedVersion`은 서버 재시작·일시정지 이후에도 브라우저가 새 확정 배치를 구분하는 데 사용합니다.
+
+---
+
+## 7. YouTube 분석 API
+
+> 현재 YouTube 분석 endpoint와 PostgreSQL 선수 데이터 조회를 함께 사용하는 통합 서비스는 로컬 실행에서 검증했습니다. 배포 환경에서는 YouTube 또는 DB 접근이 거부될 수 있으며, 이 경우 HTTP 오류와 워커의 `error` 상태를 확인해야 합니다. 점수판 OCR에는 시스템에 설치된 Tesseract 실행 프로그램이 필요합니다.
+
+### 7.1 `POST /api/v1/youtube/info`
+
+#### 요청
+
+```json
