@@ -281,6 +281,10 @@ class YoutubeLiveWorker:
             previous_top_view = False
             last_published_positions: Layout | None = None
             last_complete_confidences: dict[str, float] = {}
+            # A안: 완전 정지 확정을 기다리지 않고 "얼추 정지"한 순간 잠정 발행.
+            prev_settle_positions: Layout | None = None
+            settle_run = 0
+            provisional_emitted = False
             self.analyzer.reset_tracking()
             complete_frames = 0
             self._update(
@@ -321,6 +325,9 @@ class YoutubeLiveWorker:
                     previous_top_view = False
                     last_published_positions = None
                     last_complete_confidences = {}
+                    prev_settle_positions = None
+                    settle_run = 0
+                    provisional_emitted = False
                     complete_frames = 0
                     with self._lock:
                         self._shooter_confirmed = False
@@ -401,6 +408,42 @@ class YoutubeLiveWorker:
                             confirmed=True,
                         )
                         last_published_positions = pre_cut.positions
+                # A안: 공이 "얼추 정지"하면(연속 2샘플 이동 <= 0.012) 완전 확정을
+                # 기다리지 않고 즉시 잠정 배치를 발행해 계산으로 넘긴다. 이후
+                # stop_detector 가 정밀 확정하면 평균 좌표로 한 번 더 갱신된다.
+                if complete and detected.valid_view:
+                    if prev_settle_positions is not None:
+                        moved = layout_distance(detected.positions, prev_settle_positions)
+                        if moved > 0.020:  # 다시 굴러감 = 새 샷 → 잠정 재무장
+                            provisional_emitted = False
+                        settle_run = settle_run + 1 if moved <= 0.012 else 0
+                    prev_settle_positions = dict(detected.positions)
+                    if (
+                        stop is None
+                        and not provisional_emitted
+                        and settle_run >= 2
+                        and (
+                            last_published_positions is None
+                            or layout_distance(
+                                detected.positions, last_published_positions
+                            ) > 0.05
+                        )
+                    ):
+                        self._publish(
+                            detected.positions,
+                            timestamp=timestamp,
+                            source="settling_provisional",
+                            confidence=confidence,
+                            confidences=detected.confidences,
+                            state="settling",
+                            confirmed=True,
+                        )
+                        last_published_positions = dict(detected.positions)
+                        provisional_emitted = True
+                else:
+                    prev_settle_positions = None
+                    settle_run = 0
+                    provisional_emitted = False
                 if stop is not None:
                     self._publish(
                         stop.positions,
