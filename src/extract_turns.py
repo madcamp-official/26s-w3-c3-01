@@ -344,60 +344,86 @@ def format_turn_log(i, t, fps):
             f"프레임 {t['frame_start']}~{t['frame_end']} ({t0:.0f}~{t1:.0f}s)")
 
 
-def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
-    """점수판 이닝 이벤트(active_events)로 턴을 '정의'한다 — 점수판 우선 방식.
+def _totals_at(reader, f):
+    """f 이전(포함) 마지막으로 판독된 (frame, 흰총점, 노란총점). 없으면 None."""
+    last = None
+    for fe, w, y in reader.events:
+        if fe <= f:
+            last = (fe, w, y)
+        else:
+            break
+    return last
+
+
+def judge_event_pair(reader, i, fps):
+    """active_events[i]~[i+1] 한 턴을 '점수판만으로' 판정한다 (좌표 제외).
     연속한 두 이벤트 [ev_i, ev_{i+1}) = 한 턴. 수구=ev_i 색, 성공=다음 이벤트가
     같은 색이며 이닝 점수가 올랐는지(+2=뱅크샷). 색이 바뀌면 실패(턴 교대).
-    좌표(before/after)는 정지 배치 로그에서 이벤트 프레임 최근접으로 채운다.
+    반환 dict: shooter, success, bank, run_from, run_to, total_delta, totals([전,후]),
+               box(표시용 총점 [w,y]|None), f0, f1."""
+    col_idx = {"white": 1, "yellow": 2}
+    f0, color, run0 = reader.active_events[i]
+    f1, ncolor, run1 = reader.active_events[i + 1]
+    # 득점 근거 ①: 이닝 원형 증가량. 득점 근거 ②: 총점 박스 증가량.
+    # 두 표시는 오퍼레이터가 동시에 올리므로 서로의 판독 누락을 보완한다.
+    run_delta = (run1 - run0) if ncolor == color else 0
+    # 총점 반영은 이닝 원형보다 살짝 늦다(오퍼레이터 입력 지연). 창의 양 끝을
+    # 같은 지연폭만큼 밀어 비교해야 직전 턴의 득점이 이 턴에 귀속되지 않는다.
+    lag = int(SCORE_FAIL_MARGIN_S * fps)
+    t_before = _totals_at(reader, f0 + lag)
+    t_after = _totals_at(reader, f1 + lag)
+    me = col_idx.get(color)
+    total_delta = (t_after[me] - t_before[me]) if (t_before and t_after and me) else 0
+    if run_delta > 0 or (0 < total_delta <= 2):
+        success = True
+        # 뱅크샷(+2): 이닝 원형이 +2를 직접 봤으면 확정. 원형이 +1을 명확히 봤으면
+        # 일반 득점(총점 +2는 이전 누락분 몰아반영일 수 있어 무시). 원형 판독이
+        # 없을 때만 총점 +2를 뱅크 근거로 쓴다.
+        bank = (run_delta == 2) or (run_delta <= 0 and total_delta == 2)
+    else:                                         # 색 바뀜/점수 그대로 = 실패(턴 교대)
+        success, bank = False, False
+    totals = [list(map(int, t_before[1:])) if t_before else None,
+              list(map(int, t_after[1:])) if t_after else None]
+    return {"shooter": color, "success": success, "bank": bank,
+            "run_from": int(run0), "run_to": int(run1),
+            "total_delta": int(total_delta), "totals": totals,
+            "box": totals[1] or totals[0], "f0": int(f0), "f1": int(f1)}
+
+
+def format_live_judgment(turn_no, j):
+    """중간 진행용 잠정 판정 한 줄. (좌표 확보는 처리 종료 후 별도)"""
+    box = f"white:{j['box'][0]} yellow:{j['box'][1]}" if j["box"] else "판독중"
+    rf, rt = j["run_from"], j["run_to"]
+    run = f"{rf}→{rt}" + (f"(+{rt - rf})" if rt > rf else "")
+    flag = " [뱅크샷]" if j["bank"] else ""
+    return (f"    └ 잠정판정 턴 {turn_no}: success={j['success']}  수구={j['shooter']}  "
+            f"score={{{box}}}  연속득점={run}{flag}")
+
+
+def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
+    """점수판 이닝 이벤트(active_events)로 턴을 '정의'한다 — 점수판 우선 방식.
+    판정은 judge_event_pair(점수판 전용)로 하고, 좌표(before/after)만 여기서
+    정지 배치 로그의 이벤트 프레임 최근접으로 채운다.
     → 영상이 정지→샷→정지를 못 잡아도 점수판 변화만 있으면 턴이 확정된다.
     반환: (turns, dropped). dropped 는 좌표 부재로 폐기한 턴 [(f0, f1, color, reason)]."""
     ev = reader.active_events
     col = {"white", "yellow"}
-    col_idx = {"white": 1, "yellow": 2}
     tol = int(2.0 * fps)              # 정지 배치 최근접 허용 (2초)
     tf = sorted(tracked_frames)
     import bisect
 
-    def totals_at(f):
-        """f 이전(포함) 마지막으로 판독된 (frame, 흰총점, 노란총점). 없으면 None."""
-        last = None
-        for fe, w, y in reader.events:
-            if fe <= f:
-                last = (fe, w, y)
-            else:
-                break
-        return last
-
     turns, dropped = [], []
     for i in range(len(ev) - 1):
-        f0, color, run0 = ev[i]
-        f1, ncolor, run1 = ev[i + 1]
+        color = ev[i][1]
         if color not in col:
             continue
-        # 득점 근거 ①: 이닝 원형 증가량. 득점 근거 ②: 총점 박스 증가량.
-        # 두 표시는 오퍼레이터가 동시에 올리므로 서로의 판독 누락을 보완한다
-        # (총점 반영이 이벤트 경계보다 살짝 늦을 수 있어 f1 뒤 여유를 둔다).
-        run_delta = (run1 - run0) if ncolor == color else 0
-        # 총점 반영은 이닝 원형보다 살짝 늦다(오퍼레이터 입력 지연). 창의 양 끝을
-        # 같은 지연폭만큼 밀어 비교해야 직전 턴의 득점이 이 턴에 귀속되지 않는다.
-        lag = int(SCORE_FAIL_MARGIN_S * fps)
-        t_before = totals_at(f0 + lag)
-        t_after = totals_at(f1 + lag)
-        me = col_idx[color]
-        total_delta = (t_after[me] - t_before[me]) if (t_before and t_after) else 0
-        if run_delta > 0 or (0 < total_delta <= 2):
-            success = True
-            # 뱅크샷(+2): 이닝 원형이 +2를 직접 봤으면 확정. 원형이 +1을 명확히
-            # 봤으면 일반 득점(총점 +2는 이전 누락분 몰아반영일 수 있어 무시).
-            # 원형 판독이 없을 때만 총점 +2를 뱅크 근거로 쓴다.
-            bank = (run_delta == 2) or (run_delta <= 0 and total_delta == 2)
-        else:                                     # 색 바뀜/점수 그대로 = 실패(턴 교대)
-            success, bank = False, False
+        j = judge_event_pair(reader, i, fps)
+        f0, f1 = j["f0"], j["f1"]
         before, bsrc = _pos_at(still_log, obs, f0, tol)
         after, asrc = _pos_at(still_log, obs, f1, tol)
         if before is None or after is None:
             miss = "before" if before is None else "after"
-            dropped.append((int(f0), int(f1), color, f"{miss}_좌표없음"))
+            dropped.append((f0, f1, color, f"{miss}_좌표없음"))
             continue                              # 정지 배치가 전무 → 좌표 없어 폐기
         cov = ((bisect.bisect_left(tf, f1) - bisect.bisect_left(tf, f0))
                / max(f1 - f0, 1))
@@ -405,17 +431,15 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
             "method": "scoreboard", "shooter_source": "scoreboard",
             "coverage": round(min(cov, 1.0), 2),
             "before_source": bsrc, "after_pos_source": asrc,
-            "run_from": int(run0), "run_to": int(run1),
-            "total_delta": int(total_delta),
-            "totals": [list(map(int, t_before[1:])) if t_before else None,
-                       list(map(int, t_after[1:])) if t_after else None],
-            "bank_shot": bank, "hits": [], "cushions_before_2nd": None,
+            "run_from": j["run_from"], "run_to": j["run_to"],
+            "total_delta": j["total_delta"], "totals": j["totals"],
+            "bank_shot": j["bank"], "hits": [], "cushions_before_2nd": None,
         }
         turns.append({
             "epoch": 0, "shooter": color,
             "before": before, "after": after, "after_source": asrc,
-            "success": success, "success_detail": det,
-            "frame_start": int(f0), "frame_end": int(f1),
+            "success": j["success"], "success_detail": det,
+            "frame_start": f0, "frame_end": f1,
             "traj": {b: [] for b in BALLS},
         })
     return turns, dropped
@@ -523,6 +547,8 @@ def main():
     corner_cands = []       # 기준 잠금 전, 탑뷰 프레임들의 꼭짓점 모음
     n_proc = n_top = 0
     n_turns_saved = 0
+    n_live_judged = 0                              # 중간 잠정 판정을 찍은 이닝 이벤트 수
+    live_margin = int(SCORE_FAIL_MARGIN_S * fps)   # 총점 반영 지연 — 이만큼 지나야 판정 안정
     t0 = time.time()
 
     frame_idx = -1
@@ -600,6 +626,15 @@ def main():
             if args.save_frames:
                 cv2.imwrite(os.path.join(qa_dir, f"{video_id}_turn{n_turns_saved:02d}_after.jpg"),
                             frame)
+
+        # 중간 잠정 판정: 이닝 이벤트가 하나 닫히고(다음 이벤트 확정) 총점 반영
+        # 지연(live_margin)까지 지나면, 그 턴을 점수판만으로 미리 판정해 보여준다.
+        # (좌표는 처리 종료 후 확정 — 여기 번호/성공은 최종 결과와 대개 일치한다.)
+        while n_live_judged < len(score_reader.active_events) - 1 \
+                and score_reader.active_events[n_live_judged + 1][0] + live_margin <= frame_idx:
+            j = judge_event_pair(score_reader, n_live_judged, fps)
+            n_live_judged += 1
+            print(format_live_judgment(n_live_judged, j))
 
     extractor.flush(frame_idx)
     cap.release()
