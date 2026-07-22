@@ -163,11 +163,13 @@ class PbaScoreboardReaderTest(unittest.TestCase):
             patch.object(reader, "_read_colored", side_effect=score),
             patch.object(reader, "_read_circle", side_effect=circle),
         ):
-            self.assertIsNone(reader.sample(1, frame))
+            immediate_run = reader.sample(1, frame)
             scores = reader.sample(2, frame)
             self.assertIsNone(reader.sample(3, frame))
             result = reader.sample(4, frame)
 
+        self.assertEqual(immediate_run.player1_run, 2)
+        self.assertIsNone(immediate_run.player2_run)
         self.assertEqual(scores.player1_score, 5)
         self.assertEqual(scores.player2_score, 2)
         self.assertIsNone(scores.set_number)
@@ -200,6 +202,24 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         self.assertEqual(result.player2_score, 2)
         self.assertIsNone(result.inning)
         self.assertIsNone(result.set_number)
+
+    def test_two_detected_run_rows_are_hidden_and_force_recheck(self) -> None:
+        reader = RealtimePbaScoreboardReader(_SequenceRecognizer([]))
+        reader.box_white = (70, 30, 11, 14)
+        reader.box_yellow = (70, 44, 11, 14)
+        reader.circle_white = (85, 30, 12, 12)
+        reader.circle_yellow = (85, 44, 12, 12)
+        frame = np.full((80, 120, 3), 128, np.uint8)
+
+        with (
+            patch.object(reader, "_read_colored", return_value=1),
+            patch.object(reader, "_read_circle", return_value=(1, True)),
+        ):
+            reader.sample(1, frame)
+
+        self.assertIn("run_recheck", reader._pending)
+        self.assertNotIn("player1_run", reader._committed)
+        self.assertNotIn("player2_run", reader._committed)
 
     def test_realtime_reader_requires_three_matching_name_reads(self) -> None:
         name_recognizer = _SequenceNameRecognizer(
@@ -236,7 +256,8 @@ class PbaScoreboardReaderTest(unittest.TestCase):
             result = reader.sample(6, frame)
             after_lock = reader.sample(7, frame)
 
-        self.assertIsNone(first)
+        self.assertEqual(first.player1_run, 2)
+        self.assertIsNone(first.player2_run)
         self.assertIsNotNone(second)
         self.assertEqual(name_calls_when_scores_publish, 0)
         self.assertIsNone(third)

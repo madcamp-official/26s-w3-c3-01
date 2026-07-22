@@ -139,7 +139,7 @@ class DetectionStore:
                 **{
                     key: value
                     for key, value in scoreboard.items()
-                    if value is not None
+                    if value is not None or key in ("player1Run", "player2Run")
                 },
             }
             self._scoreboard = {"scoreboard": merged}

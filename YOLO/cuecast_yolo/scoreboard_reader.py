@@ -773,8 +773,8 @@ class RealtimePbaScoreboardReader:
             inning=number("inning"),
             player1_score=number(f"{row1_color}_score"),
             player2_score=number(f"{row2_color}_score"),
-            player1_run=number(f"{row1_color}_run"),
-            player2_run=number(f"{row2_color}_run"),
+            player1_run=number("player1_run"),
+            player2_run=number("player2_run"),
             active_color=str(self._committed["active_color"])
             if "active_color" in self._committed
             else None,
@@ -840,17 +840,47 @@ class RealtimePbaScoreboardReader:
 
         active_color = None
         active_run = None
+        active_run_player = None
+        ambiguous_runs = False
         if self.circles_locked:
             assert self.circle_white is not None and self.circle_yellow is not None
             white_run, white_has_digit = self._read_circle(frame, self.circle_white, "white")
             yellow_run, yellow_has_digit = self._read_circle(frame, self.circle_yellow, "yellow")
             if white_has_digit and not yellow_has_digit:
                 active_color, active_run = "white", white_run
+                active_run_player = 1 if self.circle_white[1] < self.circle_yellow[1] else 2
             elif yellow_has_digit and not white_has_digit:
                 active_color, active_run = "yellow", yellow_run
+                active_run_player = 1 if self.circle_yellow[1] < self.circle_white[1] else 2
+            elif white_has_digit and yellow_has_digit:
+                ambiguous_runs = True
         values["active_color"] = active_color
-        if active_color is not None:
-            values[f"{active_color}_run"] = active_run
+        if ambiguous_runs:
+            self._pending["run_recheck"] = (True, 1)
+        else:
+            self._pending.pop("run_recheck", None)
+        run_cleared = False
+        run_changed = False
+        if active_run_player is not None:
+            if self._committed.get("active_run_player") != active_run_player:
+                self._committed["active_run_player"] = active_run_player
+                run_changed = True
+                for key in ("player1_run", "player2_run"):
+                    run_cleared = self._committed.pop(key, None) is not None or run_cleared
+                    self._pending.pop(key, None)
+            active_run_key = f"player{active_run_player}_run"
+            inactive_run_key = f"player{2 if active_run_player == 1 else 1}_run"
+            run_cleared = self._committed.pop(inactive_run_key, None) is not None or run_cleared
+            self._pending.pop(inactive_run_key, None)
+            if active_run is not None and self._committed.get(active_run_key) != active_run:
+                self._committed[active_run_key] = active_run
+                self._pending.pop(active_run_key, None)
+                run_changed = True
+        elif ambiguous_runs:
+            # Keep the last unambiguous value off-screen until the forced re-read.
+            for key in ("player1_run", "player2_run"):
+                run_cleared = self._committed.pop(key, None) is not None or run_cleared
+                self._pending.pop(key, None)
 
         current_set = int(self._committed.get("set", -1))
         candidate_set = values.get("set")
@@ -876,7 +906,7 @@ class RealtimePbaScoreboardReader:
             ):
                 values["inning"] = None
 
-        committed_changed = False
+        committed_changed = run_changed or run_cleared
         for key, value in values.items():
             if key == "set":
                 confirm = self._confirm_set

@@ -50,6 +50,7 @@ class LocalUiTest(unittest.TestCase):
         self.assertTrue(FAVICON.is_file())
         self.assertIn('class="brand"', self.html)
         self.assertIn('src="/assets/logo.png"', self.html)
+        self.assertNotIn("<span>AI 3쿠션 샷 분석</span>", self.html)
         self.assertIn('rel="icon" type="image/png" href="/assets/home.png"', self.html)
 
     def test_manual_names_are_kept_only_for_the_current_session(self) -> None:
@@ -64,11 +65,16 @@ class LocalUiTest(unittest.TestCase):
         self.assertNotIn("playerNamesFromTitle", self.html)
         self.assertIn("이름 인식 중", self.html)
 
-    def test_scoreboard_keeps_set_and_hides_inning(self) -> None:
-        self.assertIn('id="scoreboard-set"', self.html)
+    def test_scoreboard_hides_set_and_inning(self) -> None:
+        self.assertNotIn('id="scoreboard-set"', self.html)
         self.assertNotIn('id="scoreboard-inning"', self.html)
-        self.assertIn("scoreboard[field]!==null", self.html)
         self.assertNotIn("String(scoreboard.set)", self.html)
+
+    def test_only_one_player_run_is_displayed(self) -> None:
+        self.assertIn("runFields.forEach", self.html)
+        self.assertIn("?'--':String(scoreboard[field])", self.html)
+        self.assertIn("player1Run", self.html)
+        self.assertIn("player2Run", self.html)
 
     def test_scoreboard_can_be_reset_for_fresh_ocr(self) -> None:
         self.assertIn('id="refresh-scoreboard"', self.html)
@@ -83,12 +89,42 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("selectShooter('yellow')", self.html)
         self.assertIn("acceptDetectedShooter(s.shooterConfirmed?s.shooter:null)", self.html)
 
-    def test_confirmed_shots_are_persisted_per_video(self) -> None:
+    def test_confirmed_shots_are_saved_only_after_score_or_turn_changes(self) -> None:
         self.assertIn('id="shot-history-list"', self.html)
         self.assertIn('id="clear-shot-history"', self.html)
         self.assertIn("cuecast-shot-history:${id}", self.html)
-        self.assertIn("recordConfirmedShot(d)", self.html)
+        self.assertIn("stageConfirmedShot(d)", self.html)
+        self.assertIn("observeShotCompletion(scoreboard)", self.html)
+        self.assertIn("scoreChanged||turnChanged", self.html)
+        self.assertIn("recordConfirmedShot(pendingShotRecord", self.html)
+        self.assertNotIn("recordConfirmedShot(d)", self.html)
         self.assertIn("data.confirmedBefore", self.html)
+
+    def test_shot_panel_uses_similar_shot_count_instead_of_confidence(self) -> None:
+        self.assertIn("<span>유사 샷 개수</span>", self.html)
+        self.assertIn('id="neighbor-count"', self.html)
+        self.assertIn("neighborRawSamples", self.html)
+        self.assertNotIn('<span>분석 신뢰도</span><strong id="confidence"', self.html)
+
+    def test_developer_details_include_hybrid_model_breakdown(self) -> None:
+        self.assertNotIn("<h2>분석 요약</h2>", self.html)
+        for element_id in (
+            "developer-confidence",
+            "developer-data-status",
+            "records",
+            "model",
+            "component-model-probability",
+            "component-model-weight",
+            "component-neighbor-probability",
+            "component-neighbor-weight",
+            "component-grid-probability",
+            "component-grid-weight",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn("components.weights", self.html)
+        self.assertIn("components.modelProbability", self.html)
+        self.assertIn("components.neighborProbability", self.html)
+        self.assertIn("components.gridProbability", self.html)
 
     def test_live_match_probability_uses_automatic_server_result(self) -> None:
         for element_id in (

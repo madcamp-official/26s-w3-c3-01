@@ -152,7 +152,7 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         worker = YoutubeLiveWorker(
             VideoPositionAnalyzer(), layout_callback, scoreboard_callback=callback
         )
-        reading = ScoreboardReading(1, 2, 3, 4, 0, 1, "yellow", "white")
+        reading = ScoreboardReading(1, 2, 3, 4, None, 1, "yellow", "white")
 
         worker._accept_scoreboard(reading, 12.5)
 
@@ -160,8 +160,36 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         self.assertEqual(status["shooter"], "yellow")
         self.assertTrue(status["shooterConfirmed"])
         self.assertEqual(status["scoreboard"]["activeColor"], "yellow")
+        self.assertIsNone(status["scoreboard"]["player1Run"])
+        self.assertEqual(status["scoreboard"]["player2Run"], 1)
         callback.assert_called_once()
         layout_callback.assert_not_called()
+
+    def test_only_active_player_keeps_a_run_value(self) -> None:
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), lambda *_: None)
+        worker._accept_scoreboard(
+            ScoreboardReading(1, 2, 3, 4, 2, None, "white", "white"), 12.5
+        )
+        first = worker.status()["scoreboard"]
+        self.assertEqual(first["player1Run"], 2)
+        self.assertIsNone(first["player2Run"])
+
+        worker._accept_scoreboard(
+            ScoreboardReading(None, None, None, None, None, 3, "yellow", "white"),
+            13.0,
+        )
+        second = worker.status()["scoreboard"]
+        self.assertIsNone(second["player1Run"])
+        self.assertEqual(second["player2Run"], 3)
+
+    def test_ambiguous_two_run_values_are_hidden(self) -> None:
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), lambda *_: None)
+        worker._accept_scoreboard(
+            ScoreboardReading(1, 2, 3, 4, 1, 2, "white", "white"), 12.5
+        )
+        scoreboard = worker.status()["scoreboard"]
+        self.assertIsNone(scoreboard["player1Run"])
+        self.assertIsNone(scoreboard["player2Run"])
 
     def test_partial_scoreboard_updates_are_merged_before_callback(self) -> None:
         callback = MagicMock()

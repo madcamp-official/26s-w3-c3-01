@@ -186,7 +186,7 @@ class YoutubeLiveWorker:
         update = {
             key: value
             for key, value in reading.to_dict().items()
-            if value is not None
+            if value is not None or key in ("player1Run", "player2Run")
         }
         shooter_changed = False
         with self._lock:
@@ -196,6 +196,12 @@ class YoutubeLiveWorker:
                 **update,
                 "detectedAtSeconds": timestamp,
             }
+            if (
+                scoreboard.get("player1Run") is not None
+                and scoreboard.get("player2Run") is not None
+            ):
+                scoreboard["player1Run"] = None
+                scoreboard["player2Run"] = None
             active_color = scoreboard.get("activeColor")
             if active_color in ("white", "yellow"):
                 if not self._shooter_confirmed or self._shooter != active_color:
