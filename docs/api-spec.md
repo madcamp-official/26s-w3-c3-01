@@ -663,3 +663,19 @@ brew install tesseract ffmpeg
 Tesseract가 없으면 점수·연속 득점·수구 판정이 갱신되지 않으며, 실시간 세트 승률의 필수 입력이 준비되지 않을 수 있습니다.
 
 ### 11.2 로컬 실행 범위
+
+- 공식 기본 URL은 `http://127.0.0.1:8765`입니다.
+- 현재 통합 시연은 로컬 서버가 YouTube에 접근하고, SSH 터널을 통해 RDS PostgreSQL에 연결하는 구조입니다.
+- 배포 환경에서 YouTube URL 분석과 DB 연결을 동시에 수행할 때 접근 거부가 관찰되었습니다.
+- 접근 거부는 네트워크 정책, 요청 제한, DB 보안 그룹 또는 자격증명 설정에 따라 발생 지점이 달라질 수 있습니다.
+- 원격 배포를 다시 시도할 때는 YouTube 분석 워커와 DB API의 분리, 프록시·큐 도입, outbound 정책 및 DB allowlist 점검이 필요합니다.
+
+---
+
+## 12. 관련 파일
+
+- [`YOLO/local_probability_server.py`](../YOLO/local_probability_server.py)
+- [`YOLO/cuecast_yolo/prematch_probability.py`](../YOLO/cuecast_yolo/prematch_probability.py)
+- [`YOLO/cuecast_yolo/live_match_state.py`](../YOLO/cuecast_yolo/live_match_state.py)
+- [`YOLO/cuecast_yolo/shot_probability.py`](../YOLO/cuecast_yolo/shot_probability.py)
+- [`YOLO/cuecast_yolo/live_youtube.py`](../YOLO/cuecast_yolo/live_youtube.py)
