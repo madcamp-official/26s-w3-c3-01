@@ -42,6 +42,12 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()       # 예: s3://my-bucket 
 S3_PREFIX = os.environ.get("S3_PREFIX", "results").strip("/")
 KEEP_VIDEOS = os.environ.get("KEEP_VIDEOS") == "1"        # 1이면 추출 후에도 원본 영상 보존
 
+# 처리 프레임레이트 목표. 영상 fps를 읽어 extract_turns 의 --every 를 자동 결정한다:
+#   every = round(fps / TARGET_FPS)  (60fps→2, 30fps→1). 방송이 60fps여도 30fps 상당으로
+# 서브샘플링해 처리량을 절반으로 줄인다 — 공 추적/정지 판정엔 30fps로 충분하고,
+# 예전 30fps 영상을 매 프레임 처리하던 것과 동일한 샘플링 밀도가 된다. 0으로 두면 항상 매 프레임.
+TARGET_FPS = float(os.environ.get("TARGET_FPS", "30"))
+
 
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -77,9 +83,44 @@ def ytdlp_cookie_args():
     return ["--cookies-from-browser", YTDLP_COOKIES]
 
 
+def choose_every(video_path):
+    """영상 fps를 읽어 처리 fps가 TARGET_FPS 근처가 되도록 --every 값을 정한다.
+    60fps→2, 30fps→1. fps를 못 읽거나 TARGET_FPS<=0 이면 1(매 프레임)."""
+    if TARGET_FPS <= 0:
+        return 1
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+    except Exception:
+        fps = 0
+    if not fps or fps <= 0:
+        return 1
+    return max(1, round(fps / TARGET_FPS))
+
+
 def video_id_of(url):
     m = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", url)
     return m.group(1) if m else re.sub(r"\W", "_", url)[-20:]
+
+
+def resolve_local(entry):
+    """pending 줄이 로컬 영상 파일이면 그 절대경로를 돌려준다(아니면 None).
+    절대경로는 그대로, 상대경로는 프로젝트 루트 기준으로 해석한다. ~ 도 확장한다.
+    file:// URL 도 허용."""
+    if entry.startswith("file://"):
+        entry = entry[len("file://"):]
+    p = os.path.expanduser(entry)
+    if not os.path.isabs(p):
+        p = os.path.join(ROOT, p)
+    return os.path.abspath(p) if os.path.isfile(p) else None
+
+
+def local_video_id(path):
+    """로컬 파일용 video_id: 확장자 뗀 파일명을 안전한 문자로 정규화."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return re.sub(r"\W", "_", stem).strip("_") or "local_video"
 
 
 def already_processed(vid):
@@ -101,15 +142,23 @@ def already_processed(vid):
 
 
 def process_url(url):
-    """URL 하나 처리. 반환: 'done'(처리됨) | 'skip'(이미 처리돼 건너뜀)."""
-    vid = video_id_of(url)
+    """작업 한 줄(url) 처리. url 은 유튜브 링크 또는 로컬 영상 파일 경로.
+    반환: 'done'(처리됨) | 'skip'(이미 처리돼 건너뜀)."""
+    # 로컬 파일이면 다운로드 단계를 건너뛰고 그 파일을 그대로 입력으로 쓴다.
+    local = resolve_local(url)
+    if local:
+        vid = local_video_id(local)
+        video_path = local          # 사용자의 원본 파일 — 절대 삭제하지 않는다
+    else:
+        vid = video_id_of(url)
+        video_path = os.path.join(VIDEOS, f"{vid}.mp4")
+
     if already_processed(vid):
         log(f"이미 처리된 영상 — 건너뜀: {vid}  ({url})   [재처리하려면 FORCE=1]")
         return "skip"
-    video_path = os.path.join(VIDEOS, f"{vid}.mp4")
     outdir = os.path.join(RESULTS, vid)
 
-    if not os.path.exists(video_path):
+    if not local and not os.path.exists(video_path):
         log(f"다운로드: {url} → {video_path}")
         # --remote-components ejs:github : YouTube 의 JS 챌린지(nsig)를 푸는 솔버 스크립트를
         # yt-dlp 공식 저장소(github.com/yt-dlp/ejs)에서 받아 실행. 없으면 "Only images available"
@@ -118,11 +167,14 @@ def process_url(url):
             [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github",
              *ytdlp_cookie_args(), "-f", YTDLP_FORMAT, "-o", video_path, url],
             check=True, timeout=1800)
+    elif local:
+        log(f"로컬 영상 사용(다운로드 생략): {video_path}")
 
-    log(f"턴 추출: {video_path}")
+    every = choose_every(video_path)
+    log(f"턴 추출: {video_path}  (--every {every}, 목표 {TARGET_FPS:.0f}fps)")
     subprocess.run(
         [PYTHON, os.path.join(SRC, "extract_turns.py"), video_path,
-         "--video-id", vid, "--outdir", outdir, "--save-frames"],
+         "--video-id", vid, "--outdir", outdir, "--every", str(every), "--save-frames"],
         check=True, cwd=ROOT, timeout=4 * 3600)
     log(f"완료: {outdir}/turns.jsonl")
 
@@ -130,7 +182,8 @@ def process_url(url):
     # 실패하면 여기서 예외가 올라가 영상이 남으므로, 재시도 시 재다운로드가 필요 없다.
     upload_results(vid, outdir)
 
-    if not KEEP_VIDEOS and os.path.exists(video_path):
+    # 로컬 원본은 사용자 파일이므로 보존한다. 삭제는 우리가 받은 videos/ 다운로드본만.
+    if not local and not KEEP_VIDEOS and os.path.exists(video_path):
         os.remove(video_path)
         log(f"원본 영상 삭제: {video_path}")
     return "done"
