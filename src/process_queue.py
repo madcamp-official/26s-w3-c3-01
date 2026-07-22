@@ -164,7 +164,7 @@ def process_url(url):
         # yt-dlp 공식 저장소(github.com/yt-dlp/ejs)에서 받아 실행. 없으면 "Only images available"
         # 로 영상 포맷을 못 가져온다. 스크립트는 한 번 받으면 캐시된다.
         subprocess.run(
-            [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github",
+            [YTDLP, "--no-playlist", "--js-runtimes", "node", "--remote-components", "ejs:github",
              *ytdlp_cookie_args(), "-f", YTDLP_FORMAT, "-o", video_path, url],
             check=True, timeout=1800)
     elif local:

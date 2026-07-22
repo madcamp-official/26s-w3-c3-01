@@ -6,7 +6,7 @@
 # (흰 박스=흰 수구 선수, 노란 박스=노란 수구 선수) 수구와 바로 매칭된다.
 #
 # 의존: tesseract 바이너리(brew install tesseract) + pytesseract 패키지.
-# 없으면 reader.enabled=False 가 되어 호출부(extract_turns)가 궤적 판정으로 폴백한다.
+# 없으면 reader.enabled=False 가 되어 호출부(extract_turns)가 즉시 중단한다(판정은 점수판 전용).
 import cv2
 import numpy as np
 

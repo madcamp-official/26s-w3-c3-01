@@ -5,11 +5,10 @@
 # 수구 산정: 점수 박스 오른쪽 원형(현재 이닝 득점 표시)에 숫자가 뜬 색 = 지금 치는 선수.
 #   턴 교대 시 상대 원형에 0이 새로 나타난다. 원형 판독 불가 구간만 움직임 기반 폴백.
 # 점수판으로 판정할 수 없는 턴(판독 끊김·점수 튐·기준값 없음)은 폐기한다.
-#   궤적(쿠션 세기) 판정은 신뢰도가 낮아 라벨로 쓰지 않는다 — 점수판이 아예 없는
-#   영상(스포방지 마스킹·화면기록 등)은 전 턴 폐기되어 0턴이 된다.
+#   궤적(쿠션 세기) 판정은 신뢰도가 낮아 사용하지 않는다(코드에서 제거됨) — 점수판이
+#   아예 없는 영상(스포방지 마스킹·화면기록 등)은 전 턴 폐기되어 0턴이 된다.
 # 출력: turns.jsonl, turns.csv (+ --save-frames 시 qa/ 폴더에 직전/이후 프레임)
 # 사용법: venv/bin/python extract_turns.py 영상경로 [--video-id ID] [--outdir DIR] [--every N]
-#         [--no-scoreboard] (디버그 전용) 점수판 없이 궤적 판정으로 저장 — 파이프라인엔 쓰지 않음
 import argparse
 import csv
 import json
@@ -37,15 +36,7 @@ SEEN_WITHIN_S = 1.5     # 이 시간 안에 관측된 공만 정지 판정에 �
 MOVE_EPS_M = 0.06       # 정지 배치에서 이만큼 벗어나면 샷 시작 (m)
 MOVE_CONFIRM = 2        # 샷 시작 판정에 필요한 연속 이탈 관측 수
 GAP_MAX_S = 4.0         # 탑뷰가 이 시간 이상 끊기면 클립 경계로 보고 리셋
-HIT_NEAR_M = 0.22       # 접촉 판정: 목적구가 움직이기 시작할 때 수구가 이 거리 안
-OBJ_MOVE_M = 0.04       # 목적구 '움직이기 시작' 판정 이동량 (m)
-# 쿠션 접촉: 레일 존(레일 폭 + 공 반지름 ≈ 0.08m) 진입 횟수로 센다.
-# 부호 반전 방식은 쿠션에 맞고 거의 멈추거나 레일을 따라 흐르는 반사를 놓친다.
-CUSHION_ZONE_M = 0.12   # 이 거리 안이면 레일 존 진입 (= 접촉)
-CUSHION_EXIT_M = 0.17   # 이 거리 밖으로 나가야 같은 레일 재접촉 인정 (히스테리시스)
-CUSHION_V_MIN = 0.15    # 존 진입 시 최소 속도 (m/s) — 정지 공 지터 제거
 TELEPORT_M_PER_FR = 0.3 # 프레임당 이 거리(9m/s) 이상 이동 = 편집 컷으로 판정
-COVERAGE_MIN = 0.35     # 샷 구간 수구 관측 비율이 이보다 낮으면 궤적 판정 보류
 CORNER_LOCK_N = 8       # 기준 꼭짓점을 이 개수의 탑뷰 프레임 합의(중앙값)로 잠금 (이상치 배제)
 CORNER_AGREE_TOL = 45   # 잠금 게이트: 최근 CORNER_LOCK_N개 후보가 이 px 안에서 일치해야 잠금.
                         # (인트로/하이라이트의 산발적 오검출 프레임에 성급히 잠기는 것 방지 —
@@ -54,10 +45,6 @@ CORNER_CUT_TOL = 90     # 기준 대비 이 px 넘게 어긋나면 카메라 컷
 SCORE_EVERY = 5         # 점수판 샘플 주기 (처리 프레임 기준) — 탑뷰가 아니어도 읽는다
 SCORE_FAIL_MARGIN_S = 3.0   # '실패' 확정에 필요한 샷 종료 후 판독 여유 (초)
 REPLAY_VISIBLE_MAX = 0.3    # 샷 구간 점수판 노출 비율이 이 미만이면 리플레이 유령 턴
-
-
-def to_m(x, y):
-    return x * TABLE_W, y * TABLE_H
 
 
 class TurnExtractor:
@@ -254,93 +241,21 @@ class TurnExtractor:
                 after[b] = (pts[-1][1], pts[-1][2])
             after_source = "last_seen"
 
-        success, detail = self._judge_success(shot)
+        # 성공 여부는 여기서 판정하지 않는다 — 영상 처리 후 점수판(OCR) 단계에서
+        # 확정하고, 점수판 판정을 못 받은 턴은 폐기한다. (궤적 판정은 제거됨)
         self.turns.append({
             "epoch": self.epoch,
             "shooter": shot["cue"],
             "before": shot["before"],
             "after": after,
             "after_source": after_source,
-            "success": success,
-            "success_detail": detail,
+            "success": None,
+            "success_detail": {"method": "pending_scoreboard",
+                               "hits": [], "cushions_before_2nd": None},
             "frame_start": shot["frame_start"],
             "frame_end": frame_idx,
-            "traj": shot["traj"],   # 판정 파라미터 튜닝용 원본 궤적 (traj.json으로 분리 저장)
+            "traj": shot["traj"],   # 디버깅용 원본 궤적 (traj.json으로 분리 저장)
         })
-
-    # ---------- 성공 판정 (궤적 분석) ----------
-    def _judge_success(self, shot):
-        cue = shot["cue"]
-        objs = [b for b in BALLS if b != cue]
-        traj = {b: [(f, *to_m(x, y)) for f, x, y in shot["traj"][b]] for b in BALLS}
-        cue_tr = traj[cue]
-        n_obs = sum(1 for f, _, _ in cue_tr if f >= shot["frame_start"])
-        n_frames = max(cue_tr[-1][0] - shot["frame_start"], 1) if cue_tr else 1
-        coverage = min(n_obs / n_frames, 1.0)
-
-        detail = {"method": "trajectory", "coverage": round(coverage, 2),
-                  "hits": [], "cushions_before_2nd": None}
-        if len(cue_tr) < 5 or coverage < COVERAGE_MIN:
-            detail["method"] = "insufficient"
-            return None, detail
-
-        # 쿠션 접촉: 4개 레일 존 진입 횟수 (히스테리시스로 중복 방지).
-        # 샷 시작 시 이미 존 안이면(레일에 붙여 놓고 치는 경우) 첫 진입은 세지 않는다.
-        rails = (("x0", 0, 0), ("x1", 0, TABLE_W), ("y0", 1, 0), ("y1", 1, TABLE_H))
-        cushion_frames = []
-        inside = {}
-        for i, (f, x, y) in enumerate(cue_tr):
-            if i > 0:
-                f0, x0, y0 = cue_tr[i - 1]
-                speed = np.hypot(x - x0, y - y0) / max(f - f0, 1) * self.fps
-            else:
-                speed = 0.0
-            for name, axis, edge in rails:
-                dist = abs((x, y)[axis] - edge)
-                if name not in inside:
-                    inside[name] = dist < CUSHION_ZONE_M    # 초기 상태
-                    continue
-                if inside[name]:
-                    if dist > CUSHION_EXIT_M:
-                        inside[name] = False
-                elif dist < CUSHION_ZONE_M and speed > CUSHION_V_MIN:
-                    inside[name] = True
-                    cushion_frames.append(f)
-
-        # 목적구 접촉: 접촉하면 목적구가 반드시 움직인다 → "움직임 시작 시점에
-        # 수구가 근처에 있었는가"로 판정. 단순 근접 통과(스침)는 세지 않는다.
-        cue_by_f = {f: (x, y) for f, x, y in cue_tr}
-        cue_x0, cue_y0 = to_m(*shot["before"][cue])
-        hit_frame = {}
-        for o in objs:
-            ox0, oy0 = to_m(*shot["before"][o])
-            move_pt = None      # 목적구가 처음 움직인 관측 (지속 이동 확인)
-            for j, (f, x, y) in enumerate(traj[o]):
-                if ((x - ox0) ** 2 + (y - oy0) ** 2) ** 0.5 > OBJ_MOVE_M:
-                    nxt = traj[o][j + 1:j + 3]
-                    if not nxt or any(((x2 - ox0) ** 2 + (y2 - oy0) ** 2) ** 0.5 > OBJ_MOVE_M
-                                      for _, x2, y2 in nxt):
-                        move_pt = (f, x, y)
-                        break
-            if move_pt is None:
-                continue
-            mf, mx, my = move_pt
-            cands = [cue_by_f[g] for g in range(mf - 6, mf + 3) if g in cue_by_f]
-            if not cands:
-                continue
-            d_cue = min(((cx - mx) ** 2 + (cy - my) ** 2) ** 0.5 for cx, cy in cands)
-            cue_departed = any(((cx - cue_x0) ** 2 + (cy - cue_y0) ** 2) ** 0.5 > 0.05
-                               for cx, cy in cands)
-            if d_cue < HIT_NEAR_M and cue_departed:
-                hit_frame[o] = mf
-
-        detail["hits"] = sorted(hit_frame, key=hit_frame.get)
-        if len(hit_frame) < 2:
-            return False, detail
-        f_second = max(hit_frame.values())
-        n_cushion = sum(1 for f in cushion_frames if f <= f_second + 1)
-        detail["cushions_before_2nd"] = n_cushion
-        return n_cushion >= 3, detail
 
 
 def drop_replay_turns(turns, reader):
@@ -405,12 +320,37 @@ def _pos_at(still_log, obs, frame, tol):
     return layout, ("obs_near" if maxd <= tol else "obs_far")
 
 
+def format_turn_log(i, t, fps):
+    """확정된 턴 하나를 사람이 읽는 한 줄 로그로. 성공/수구/점수판 판독 근거를 노출."""
+    d = t["success_detail"]
+    sh = t["shooter"]
+    src = d.get("shooter_source", "?")
+    # 점수(총점 박스): 이 턴 종료 시점 판독을 우선, 없으면 시작 시점.
+    totals = d.get("totals") or [None, None]
+    box = totals[1] or totals[0]
+    score = f"white:{box[0]} yellow:{box[1]}" if box else "판독없음"
+    # 이닝 연속득점: 시작→종료 원형값 (같은 색으로 이어졌을 때만 증가)
+    rf, rt = d.get("run_from"), d.get("run_to")
+    if rf is not None and rt is not None:
+        run = f"{rf}→{rt}" + (f"(+{rt - rf})" if rt > rf else "")
+    else:
+        rs = d.get("run_steps")
+        run = f"+{sum(s[1] for s in rs)}" if rs else "-"
+    flags = " [뱅크샷]" if d.get("bank_shot") else ""
+    t0 = t["frame_start"] / fps
+    t1 = t["frame_end"] / fps
+    return (f"  턴 {i}: success={t['success']}  수구={sh}({src})  "
+            f"score={{{score}}}  연속득점={run}{flags}  "
+            f"프레임 {t['frame_start']}~{t['frame_end']} ({t0:.0f}~{t1:.0f}s)")
+
+
 def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
     """점수판 이닝 이벤트(active_events)로 턴을 '정의'한다 — 점수판 우선 방식.
     연속한 두 이벤트 [ev_i, ev_{i+1}) = 한 턴. 수구=ev_i 색, 성공=다음 이벤트가
     같은 색이며 이닝 점수가 올랐는지(+2=뱅크샷). 색이 바뀌면 실패(턴 교대).
     좌표(before/after)는 정지 배치 로그에서 이벤트 프레임 최근접으로 채운다.
-    → 영상이 정지→샷→정지를 못 잡아도 점수판 변화만 있으면 턴이 확정된다."""
+    → 영상이 정지→샷→정지를 못 잡아도 점수판 변화만 있으면 턴이 확정된다.
+    반환: (turns, dropped). dropped 는 좌표 부재로 폐기한 턴 [(f0, f1, color, reason)]."""
     ev = reader.active_events
     col = {"white", "yellow"}
     col_idx = {"white": 1, "yellow": 2}
@@ -428,7 +368,7 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
                 break
         return last
 
-    turns = []
+    turns, dropped = [], []
     for i in range(len(ev) - 1):
         f0, color, run0 = ev[i]
         f1, ncolor, run1 = ev[i + 1]
@@ -456,6 +396,8 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
         before, bsrc = _pos_at(still_log, obs, f0, tol)
         after, asrc = _pos_at(still_log, obs, f1, tol)
         if before is None or after is None:
+            miss = "before" if before is None else "after"
+            dropped.append((int(f0), int(f1), color, f"{miss}_좌표없음"))
             continue                              # 정지 배치가 전무 → 좌표 없어 폐기
         cov = ((bisect.bisect_left(tf, f1) - bisect.bisect_left(tf, f0))
                / max(f1 - f0, 1))
@@ -476,7 +418,7 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
             "frame_start": int(f0), "frame_end": int(f1),
             "traj": {b: [] for b in BALLS},
         })
-    return turns
+    return turns, dropped
 
 
 def apply_scoreboard_judgment(turns, reader, fps):
@@ -535,7 +477,6 @@ def apply_scoreboard_judgment(turns, reader, fps):
             if reader.last_read_frame is None or reader.last_read_frame < need:
                 continue
             ok = False
-        det["traj_success"] = t["success"]      # 궤적 판정 결과 보존 (QA 비교용)
         det["method"] = "scoreboard"
         det["score_steps"] = [[int(f), int(dw), int(dy)] for f, dw, dy in win]
         if run_steps:
@@ -558,8 +499,6 @@ def main():
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--save-frames", action="store_true",
                         help="턴별 직전/이후 프레임을 qa/ 폴더에 저장")
-    parser.add_argument("--no-scoreboard", action="store_true",
-                        help="(디버그 전용) 점수판 없이 궤적 판정으로 저장 — 파이프라인엔 쓰지 말 것")
     args = parser.parse_args()
     video_id = args.video_id or os.path.splitext(os.path.basename(args.video))[0]
     os.makedirs(args.outdir, exist_ok=True)
@@ -575,12 +514,11 @@ def main():
 
     model = YOLO(MODEL_PATH)
     extractor = TurnExtractor(fps=fps / args.every * args.every)  # fps는 원본 기준
-    score_reader = None
-    if not args.no_scoreboard:
-        score_reader = ScoreReader()
-        if not score_reader.enabled:
-            print("점수판 OCR 비활성: tesseract 미설치(brew install tesseract) → 궤적 판정만 사용")
-            score_reader = None
+    # 성공 판정은 점수판 OCR 전용 — tesseract 없이는 라벨을 만들 수 없으므로 즉시 중단
+    score_reader = ScoreReader()
+    if not score_reader.enabled:
+        raise SystemExit("점수판 OCR 불가: tesseract 미설치(brew install tesseract). "
+                         "판정은 점수판 전용이므로 처리를 중단합니다.")
     corners = None
     corner_cands = []       # 기준 잠금 전, 탑뷰 프레임들의 꼭짓점 모음
     n_proc = n_top = 0
@@ -600,7 +538,7 @@ def main():
         n_proc += 1
 
         # 점수판은 탑뷰 여부와 무관하게 샘플링 (클로즈업 화면에도 떠 있다)
-        if score_reader and n_proc % SCORE_EVERY == 0:
+        if n_proc % SCORE_EVERY == 0:
             score_reader.sample(frame_idx, frame)
 
         fast = detect_corners_fast(frame)
@@ -643,8 +581,7 @@ def main():
         # 정지 순간 동기화 샘플링: 공이 멈춰 있는 프레임에서는 점수판을 즉시 읽는다.
         # (좌표 스냅샷과 점수판 스냅샷을 같은 시점에 확보 → 수구/이닝/총점 놓침 방지.
         #  sample() 내부의 픽셀 변화 게이트 덕에 실제 OCR은 값이 바뀔 때만 돈다.)
-        if score_reader and extractor._cur_still \
-                and extractor._cur_still[1] == frame_idx:
+        if extractor._cur_still and extractor._cur_still[1] == frame_idx:
             score_reader.sample(frame_idx, frame)
 
         # 샷 시작 시점 프레임 저장 (점수판 포함 → 성공 여부 수동 검증용)
@@ -653,13 +590,13 @@ def main():
             cv2.imwrite(os.path.join(
                 qa_dir, f"{video_id}_turn{len(extractor.turns) + 1:02d}_before.jpg"), frame)
 
-        # 새 턴이 확정되면 QA 프레임 저장 + 진행 로그
+        # 새 샷 구간이 감지되면 QA 프레임 저장 + 진행 표시. 이 감지는 영상 기반
+        # 임시 구간일 뿐 — 최종 턴/성공/수구는 처리 종료 후 점수판으로 새로 정의된다.
         if len(extractor.turns) > n_turns_saved:
             t = extractor.turns[-1]
             n_turns_saved = len(extractor.turns)
-            print(f"  턴 {n_turns_saved}: {t['shooter']} 수구, "
-                  f"성공={t['success']} ({t['success_detail']}), "
-                  f"프레임 {t['frame_start']}~{t['frame_end']}")
+            print(f"  [감지] 임시 샷 {n_turns_saved} @프레임 {t['frame_start']}~{t['frame_end']} "
+                  f"(최종 판정은 처리 종료 후 점수판으로)")
             if args.save_frames:
                 cv2.imwrite(os.path.join(qa_dir, f"{video_id}_turn{n_turns_saved:02d}_after.jpg"),
                             frame)
@@ -668,26 +605,37 @@ def main():
     cap.release()
 
     # 점수판 주도 방식: 이닝 이벤트가 턴을 '정의'한다 (영상 정지→샷→정지에 의존하지 않음).
-    if score_reader and score_reader.locked and len(score_reader.active_events) >= 2:
-        turns = build_turns_from_scoreboard(
+    if score_reader.locked and len(score_reader.active_events) >= 2:
+        turns, dropped = build_turns_from_scoreboard(
             score_reader, extractor.still_log, extractor.obs, extractor.tracked_frames, fps)
         n_lowcov = sum(1 for t in turns if t["success_detail"]["coverage"] < 0.2)
         n_far = sum(1 for t in turns
                     if "far" in t["success_detail"]["before_source"]
                     or "far" in t["success_detail"]["after_pos_source"])
         extractor.turns = turns
-        print(f"점수판 주도 턴 생성: {len(turns)}턴 "
-              f"(이닝 이벤트 {len(score_reader.active_events)}개, 정지배치 {len(extractor.still_log)}개) "
-              f"| 저커버리지 {n_lowcov}, 좌표원거리 {n_far}")
-    elif score_reader and score_reader.locked and score_reader.events:
-        # 이닝 원형은 못 읽었지만 총점 박스는 읽힌 방송 → 구(舊) 방식(영상 턴 + 총점 판정)으로 폴백
+        print(f"\n=== 점수판 주도 턴 확정: {len(turns)}턴 "
+              f"(이닝 이벤트 {len(score_reader.active_events)}개, 정지배치 {len(extractor.still_log)}개, "
+              f"폐기 {len(dropped)}개) ===")
+        for i, t in enumerate(turns, 1):
+            print(format_turn_log(i, t, fps))
+        for f0, f1, color, reason in dropped:
+            print(f"  [폐기] 프레임 {f0}~{f1} 수구={color}: {reason} "
+                  f"(정지 배치를 못 찾아 좌표 확보 실패 → 라벨 제외)")
+        if n_lowcov or n_far:
+            print(f"  (참고: 저커버리지 {n_lowcov}개, 좌표원거리(obs_far) {n_far}개 — "
+                  f"저장은 하되 품질 낮음)")
+    elif score_reader.locked and score_reader.events:
+        # 이닝 원형은 못 읽었지만 총점 박스는 읽힌 방송 → 영상 샷 구간 + 총점 판정으로 폴백
+        # (이 경로도 판정 근거는 점수판뿐 — 판정 못 받은 턴은 전부 폐기된다)
         kept, dropped = drop_replay_turns(extractor.turns, score_reader)
         extractor.turns = kept
         n_sb = apply_scoreboard_judgment(extractor.turns, score_reader, fps)
         extractor.turns, n_unjudged = drop_unjudged_turns(extractor.turns)
-        print(f"[폴백] 이닝 이벤트 부족 → 영상 턴 + 총점 판정: {n_sb}턴 확정, "
-              f"판정 불가 {n_unjudged}개")
-    elif score_reader:
+        print(f"\n=== [폴백] 이닝 이벤트 부족 → 영상 샷 구간 + 총점 판정: {n_sb}턴 확정, "
+              f"판정 불가 {n_unjudged}개 폐기 ===")
+        for i, t in enumerate(extractor.turns, 1):
+            print(format_turn_log(i, t, fps))
+    else:
         # 점수판이 아예 없는 영상(스포방지·화면기록 등) → 라벨 신뢰 불가, 전 턴 폐기
         print(f"점수판 미검출 → 전 {len(extractor.turns)}턴 폐기 (점수판 없는 영상은 데이터로 쓰지 않음)")
         extractor.turns = []
