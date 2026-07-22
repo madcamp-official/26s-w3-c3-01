@@ -113,6 +113,8 @@ class DetectionStore:
                     "confirmedVersion": self._confirmed_version,
                     "confirmedBefore": value.get("before"),
                     "confirmedPrediction": value.get("prediction"),
+                    "confirmedShooter": value.get("shooter"),
+                    "confirmedAnalysis": value.get("analysis"),
                 }
             self._value = {"version": self._version, **value}
             return {**self._value, **self._confirmed, **self._scoreboard}
@@ -121,6 +123,11 @@ class DetectionStore:
         with self._lock:
             self._scoreboard = {"scoreboard": dict(scoreboard)}
             return dict(self._scoreboard)
+
+    def clear_scoreboard(self) -> dict[str, object]:
+        with self._lock:
+            self._scoreboard = {}
+            return {"scoreboard": None}
 
     def get(self) -> dict[str, object]:
         with self._lock:
@@ -320,6 +327,11 @@ def create_handler(
                     return
                 if path == "/api/v1/youtube/live/shooter":
                     live_worker.set_shooter(str(payload["shooter"]))
+                    self._send_json(live_worker.status())
+                    return
+                if path == "/api/v1/youtube/live/scoreboard/reset":
+                    live_worker.reset_scoreboard()
+                    detections.clear_scoreboard()
                     self._send_json(live_worker.status())
                     return
                 self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)

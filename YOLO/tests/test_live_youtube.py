@@ -41,6 +41,72 @@ class YoutubeLiveWorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "white 또는 yellow"):
             worker.set_shooter("red")
 
+    def test_manual_shooter_updates_status_and_republishes_layout(self) -> None:
+        layout_callback = MagicMock()
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), layout_callback)
+        worker._publish(
+            POSITIONS,
+            timestamp=10.0,
+            source="stopped",
+            confidence=0.9,
+            state="confirmed",
+            confirmed=True,
+        )
+        layout_callback.reset_mock()
+
+        worker.set_shooter("yellow")
+
+        status = worker.status()
+        self.assertEqual(status["shooter"], "yellow")
+        self.assertTrue(status["shooterConfirmed"])
+        self.assertEqual(status["shooterSource"], "manual")
+        layout_callback.assert_called_once()
+        self.assertEqual(layout_callback.call_args.args[1], "yellow")
+        self.assertTrue(layout_callback.call_args.args[2]["shooterRefresh"])
+
+    def test_reset_scoreboard_clears_ocr_status(self) -> None:
+        reader = MagicMock()
+        reader.enabled = True
+        worker = YoutubeLiveWorker(
+            VideoPositionAnalyzer(), lambda *_: None, scoreboard_reader=reader
+        )
+        worker._status.update(
+            scoreboardDetected=True,
+            scoreboard={"set": 3},
+            shooterConfirmed=True,
+            shooterSource="scoreboard",
+        )
+        worker._shooter_confirmed = True
+
+        worker.reset_scoreboard()
+
+        reader.reset.assert_called_once_with()
+        status = worker.status()
+        self.assertFalse(status["scoreboardDetected"])
+        self.assertIsNone(status["scoreboard"])
+        self.assertFalse(status["shooterConfirmed"])
+
+    def test_fast_scoreboard_color_confirms_shooter_before_full_ocr(self) -> None:
+        layout_callback = MagicMock()
+        worker = YoutubeLiveWorker(VideoPositionAnalyzer(), layout_callback)
+        worker._publish(
+            POSITIONS,
+            timestamp=10.0,
+            source="stopped",
+            confidence=0.9,
+            state="confirmed",
+            confirmed=True,
+        )
+        layout_callback.reset_mock()
+
+        worker._accept_fast_shooter("yellow", 10.25)
+
+        status = worker.status()
+        self.assertEqual(status["shooter"], "yellow")
+        self.assertTrue(status["shooterConfirmed"])
+        self.assertEqual(status["shooterSource"], "scoreboard_fast")
+        layout_callback.assert_called_once()
+
     def test_sync_request_is_consumed_once(self) -> None:
         worker = YoutubeLiveWorker(VideoPositionAnalyzer(), lambda *_: None)
         worker._status["running"] = True

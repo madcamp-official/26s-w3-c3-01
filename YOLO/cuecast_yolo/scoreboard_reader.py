@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import re
 from typing import Callable
+import unicodedata
 
 import cv2
 import numpy as np
 
 
 DigitRecognizer = Callable[[np.ndarray], int | None]
+NameRecognizer = Callable[[np.ndarray], str | None]
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,8 @@ class ScoreboardReading:
     player2_run: int
     active_color: str | None = None
     row1_color: str | None = None
+    player1_name: str | None = None
+    player2_name: str | None = None
 
     def to_dict(self) -> dict[str, int | str | None]:
         result: dict[str, int | str | None] = {
@@ -33,6 +39,8 @@ class ScoreboardReading:
             "player2Run": self.player2_run,
             "activeColor": self.active_color,
             "row1Color": self.row1_color,
+            "player1Name": self.player1_name,
+            "player2Name": self.player2_name,
         }
         return result
 
@@ -387,6 +395,84 @@ class TesseractDigitRecognizer:
         return None
 
 
+class TesseractNameRecognizer:
+    """Korean/English OCR for the two stable player-name rows."""
+
+    def __init__(self) -> None:
+        self.pytesseract = None
+        self.language = "kor+eng"
+        self.tessdata_config = ""
+        try:
+            import pytesseract
+
+            windows_binary = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+            if windows_binary.exists():
+                pytesseract.pytesseract.tesseract_cmd = str(windows_binary)
+            languages = set(pytesseract.get_languages(config=""))
+            if "kor" not in languages:
+                local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+                local_tessdata = (
+                    Path(local_app_data) / "CueCast" / "tessdata"
+                    if local_app_data
+                    else None
+                )
+                if local_tessdata and (local_tessdata / "kor.traineddata").exists():
+                    self.language = "kor"
+                    self.tessdata_config = f"--tessdata-dir {local_tessdata.as_posix()}"
+                    languages = set(
+                        pytesseract.get_languages(config=self.tessdata_config)
+                    )
+            if "kor" in languages:
+                self.pytesseract = pytesseract
+        except Exception:
+            self.pytesseract = None
+
+    @property
+    def available(self) -> bool:
+        return self.pytesseract is not None
+
+    @staticmethod
+    def normalize(text: str) -> str | None:
+        value = unicodedata.normalize("NFC", text)
+        value = re.sub(r"[^가-힣A-Za-z· ]", "", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value if 2 <= len(value) <= 20 else None
+
+    def __call__(self, image: np.ndarray) -> str | None:
+        if not self.available or image.size == 0:
+            return None
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        up = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        _, otsu = cv2.threshold(
+            up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        adaptive = cv2.adaptiveThreshold(
+            up,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            5,
+        )
+        # Thin white Korean glyphs sometimes disappear under global Otsu at
+        # 360p. Try the original grayscale, Otsu, then adaptive threshold.
+        for candidate in (up, otsu, adaptive):
+            if float(np.mean(candidate)) < 127:
+                candidate = cv2.bitwise_not(candidate)
+            candidate = cv2.copyMakeBorder(
+                candidate, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255
+            )
+            text = self.pytesseract.image_to_string(
+                candidate,
+                lang=self.language,
+                config=f"--oem 1 --psm 7 {self.tessdata_config}".strip(),
+            )
+            normalized = self.normalize(text)
+            if normalized is not None:
+                return normalized
+        return None
+
+
 class RealtimePbaScoreboardReader:
     """fa6bfa5 score boxes/circles adapted to the live CueCast status contract."""
 
@@ -396,14 +482,26 @@ class RealtimePbaScoreboardReader:
     WHITE_V_MIN = 170
     LOCK_FRAMES = 5
     HEARTBEAT_SAMPLES = 20
+    NAME_CONFIRMATIONS = 3
+    SET_CONFIRMATIONS = 4
+    SET_MIN = 1
+    SET_MAX = 7
+    NAME_CELLS = {
+        # Normalized coordinates inside panel_box. The score cells begin at
+        # x=0.715, so these crops deliberately stop before them.
+        "player1_name": (0.04, 0.29, 0.68, 0.64),
+        "player2_name": (0.04, 0.65, 0.68, 0.99),
+    }
 
     def __init__(
         self,
         recognizer: TesseractDigitRecognizer | None = None,
         header_recognizer: DigitRecognizer | None = None,
+        name_recognizer: NameRecognizer | None = None,
     ) -> None:
         self.recognizer = recognizer or TesseractDigitRecognizer()
         self.header_recognizer = header_recognizer or SyntheticDigitRecognizer()
+        self.name_recognizer = name_recognizer or TesseractNameRecognizer()
         self.enabled = self.recognizer.available
         self.reset()
 
@@ -419,6 +517,7 @@ class RealtimePbaScoreboardReader:
         self._since_ocr = 0
         self._pending: dict[str, tuple[object, int]] = {}
         self._committed: dict[str, object] = {}
+        self._names_locked = False
 
     @property
     def locked(self) -> bool:
@@ -427,6 +526,10 @@ class RealtimePbaScoreboardReader:
     @property
     def circles_locked(self) -> bool:
         return self.circle_white is not None and self.circle_yellow is not None
+
+    @property
+    def names_locked(self) -> bool:
+        return self._names_locked
 
     def _try_locate_boxes(self, frame: np.ndarray) -> None:
         height, width = frame.shape[:2]
@@ -620,6 +723,40 @@ class RealtimePbaScoreboardReader:
         self._pending.pop(key, None)
         return True
 
+    def _confirm_name(self, key: str, value: object | None) -> bool:
+        """Require three identical consecutive OCR reads before publishing a name."""
+        if value is None:
+            self._pending.pop(key, None)
+            return False
+        if self._committed.get(key) == value:
+            self._pending.pop(key, None)
+            return False
+        pending = self._pending.get(key)
+        count = pending[1] + 1 if pending and pending[0] == value else 1
+        if count < self.NAME_CONFIRMATIONS:
+            self._pending[key] = (value, count)
+            return False
+        self._committed[key] = value
+        self._pending.pop(key, None)
+        return True
+
+    def _confirm_set(self, key: str, value: object | None) -> bool:
+        """Use a longer stable window for the tiny 360p set-number glyph."""
+        if value is None:
+            self._pending.pop(key, None)
+            return False
+        if self._committed.get(key) == value:
+            self._pending.pop(key, None)
+            return False
+        pending = self._pending.get(key)
+        count = pending[1] + 1 if pending and pending[0] == value else 1
+        if count < self.SET_CONFIRMATIONS:
+            self._pending[key] = (value, count)
+            return False
+        self._committed[key] = value
+        self._pending.pop(key, None)
+        return True
+
     def sample(self, _frame_number: int, frame: np.ndarray) -> ScoreboardReading | None:
         if not self.enabled:
             return None
@@ -659,8 +796,16 @@ class RealtimePbaScoreboardReader:
             inning = self.header_recognizer(
                 self._crop(panel, PbaScoreboardReader.DIGIT_CELLS["inning"])
             )
-            values["set"] = set_number if set_number is not None and 0 <= set_number <= 9 else None
+            values["set"] = (
+                set_number
+                if set_number is not None and self.SET_MIN <= set_number <= self.SET_MAX
+                else None
+            )
             values["inning"] = inning if inning is not None and 0 <= inning <= 99 else None
+            if not self._names_locked:
+                for key, cell in self.NAME_CELLS.items():
+                    if key not in self._committed:
+                        values[key] = self.name_recognizer(self._crop(panel, cell))
 
         active_color = None
         active_run = None
@@ -702,7 +847,19 @@ class RealtimePbaScoreboardReader:
 
         committed_changed = False
         for key, value in values.items():
-            committed_changed = self._confirm(key, value) or committed_changed
+            if key in self.NAME_CELLS:
+                confirm = self._confirm_name
+            elif key == "set":
+                confirm = self._confirm_set
+            else:
+                confirm = self._confirm
+            committed_changed = confirm(key, value) or committed_changed
+        if not self._names_locked and all(
+            key in self._committed for key in self.NAME_CELLS
+        ):
+            self._names_locked = True
+            for key in self.NAME_CELLS:
+                self._pending.pop(key, None)
         if not committed_changed:
             return None
         required = ("set", "inning", "white_score", "yellow_score")
@@ -724,4 +881,86 @@ class RealtimePbaScoreboardReader:
             if "active_color" in self._committed
             else None,
             row1_color=row1_color,
+            player1_name=str(self._committed["player1_name"])
+            if "player1_name" in self._committed
+            else None,
+            player2_name=str(self._committed["player2_name"])
+            if "player2_name" in self._committed
+            else None,
         )
+
+
+class FastPbaCueColorReader(RealtimePbaScoreboardReader):
+    """Detect only the active cue-ball color without running Tesseract OCR."""
+
+    CONFIRMATIONS = 2
+
+    def __init__(self) -> None:
+        # The inherited locator only needs color/shape state. Avoid constructing
+        # digit and Korean OCR recognizers for this latency-sensitive path.
+        self.enabled = True
+        self.reset()
+        self._cue_pending: tuple[str, int] | None = None
+        self._cue_current: str | None = None
+
+    def reset(self) -> None:
+        super().reset()
+        self._cue_pending = None
+        self._cue_current = None
+
+    def _has_circle_digit(
+        self, frame: np.ndarray, box: tuple[int, int, int, int], color: str
+    ) -> bool:
+        x, y, w, h = box
+        crop = frame[y : y + h, x : x + w]
+        if crop.size == 0:
+            return False
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        if color == "white":
+            fraction = np.mean(
+                (hsv[..., 1] < self.WHITE_S_MAX)
+                & (hsv[..., 2] > self.WHITE_V_MIN)
+            )
+        else:
+            fraction = np.mean(cv2.inRange(hsv, self.YELLOW_LO, self.YELLOW_HI) > 0)
+        if fraction < 0.35:
+            return False
+        margin = max(2, int(0.18 * min(w, h)))
+        inner = cv2.cvtColor(
+            crop[margin : h - margin, margin : w - margin], cv2.COLOR_BGR2GRAY
+        )
+        return bool(inner.size and float(np.mean(inner < 100)) >= 0.03)
+
+    def sample(self, _frame_number: int, frame: np.ndarray) -> str | None:
+        if not self.locked:
+            self._try_locate_boxes(frame)
+            if not self.locked:
+                return None
+        if not self.circles_locked:
+            self._try_locate_circles(frame)
+            if not self.circles_locked:
+                return None
+        assert self.circle_white is not None and self.circle_yellow is not None
+        white_has_digit = self._has_circle_digit(frame, self.circle_white, "white")
+        yellow_has_digit = self._has_circle_digit(frame, self.circle_yellow, "yellow")
+        candidate = (
+            "white"
+            if white_has_digit and not yellow_has_digit
+            else "yellow"
+            if yellow_has_digit and not white_has_digit
+            else None
+        )
+        if candidate is None:
+            self._cue_pending = None
+            return None
+        count = (
+            self._cue_pending[1] + 1
+            if self._cue_pending and self._cue_pending[0] == candidate
+            else 1
+        )
+        self._cue_pending = (candidate, count)
+        if count < self.CONFIRMATIONS or candidate == self._cue_current:
+            return None
+        self._cue_current = candidate
+        self._cue_pending = None
+        return candidate

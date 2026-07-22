@@ -10,7 +10,11 @@ import cv2
 
 from .detector import BALL_NAMES
 from .precut import PreCutLayoutBuffer
-from .scoreboard_reader import RealtimePbaScoreboardReader, ScoreboardReading
+from .scoreboard_reader import (
+    FastPbaCueColorReader,
+    RealtimePbaScoreboardReader,
+    ScoreboardReading,
+)
 from .stop_detector import BallStopDetector
 from .video_position_analyzer import VideoPositionAnalyzer
 
@@ -46,8 +50,11 @@ class YoutubeLiveWorker:
         self.callback = callback
         self.sample_fps = sample_fps
         self.scoreboard_reader = scoreboard_reader or RealtimePbaScoreboardReader()
+        self.cue_color_reader = FastPbaCueColorReader()
         self.scoreboard_callback = scoreboard_callback
         self._lock = Lock()
+        self._scoreboard_lock = Lock()
+        self._cue_color_lock = Lock()
         self._thread: Thread | None = None
         self._stop = Event()
         self._shooter = "white"
@@ -110,6 +117,44 @@ class YoutubeLiveWorker:
         with self._lock:
             self._shooter = shooter
             self._shooter_confirmed = True
+            self._status.update(
+                shooter=shooter,
+                shooterConfirmed=True,
+                shooterSource="manual",
+            )
+        self._republish_last_confirmed()
+
+    def reset_scoreboard(self) -> None:
+        """Forget OCR decisions so the current scoreboard can be read again."""
+        with self._scoreboard_lock:
+            self.scoreboard_reader.reset()
+        with self._cue_color_lock:
+            self.cue_color_reader.reset()
+        with self._lock:
+            self._shooter_confirmed = False
+            self._status.update(
+                scoreboardDetected=False,
+                scoreboard=None,
+                lastScoreboardSeconds=None,
+                shooterConfirmed=False,
+                shooterSource=None,
+            )
+
+    def _accept_fast_shooter(self, shooter: str, timestamp: float) -> None:
+        changed = False
+        with self._lock:
+            if not self._shooter_confirmed or self._shooter != shooter:
+                changed = True
+            self._shooter = shooter
+            self._shooter_confirmed = True
+            self._status.update(
+                shooter=shooter,
+                shooterConfirmed=True,
+                shooterSource="scoreboard_fast",
+                lastShooterSeconds=timestamp,
+            )
+        if changed:
+            self._republish_last_confirmed()
 
     def sync_to(self, seconds: float) -> None:
         if seconds < 0:
@@ -224,6 +269,7 @@ class YoutubeLiveWorker:
         capture = None
         scoreboard_stop = Event()
         scoreboard_thread: Thread | None = None
+        cue_color_thread: Thread | None = None
         try:
             video = self.analyzer.resolve(source)
             capture = cv2.VideoCapture(video.media_url)
@@ -234,6 +280,9 @@ class YoutubeLiveWorker:
             frame_number = max(0, round(start_seconds * fps))
             capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
             scoreboard_queue: Queue[
+                tuple[int, int, float, object]
+            ] = Queue(maxsize=1)
+            cue_color_queue: Queue[
                 tuple[int, int, float, object]
             ] = Queue(maxsize=1)
             scoreboard_epoch = 0
@@ -247,14 +296,34 @@ class YoutubeLiveWorker:
                         )
                     except Empty:
                         continue
-                    if epoch != active_epoch:
-                        self.scoreboard_reader.reset()
-                        active_epoch = epoch
-                    reading = self.scoreboard_reader.sample(
-                        sample_frame, sample_image  # type: ignore[arg-type]
-                    )
+                    with self._scoreboard_lock:
+                        if epoch != active_epoch:
+                            self.scoreboard_reader.reset()
+                            active_epoch = epoch
+                        reading = self.scoreboard_reader.sample(
+                            sample_frame, sample_image  # type: ignore[arg-type]
+                        )
                     if reading is not None:
                         self._accept_scoreboard(reading, sample_time)
+
+            def cue_color_loop() -> None:
+                active_epoch = -1
+                while not scoreboard_stop.is_set():
+                    try:
+                        epoch, sample_frame, sample_time, sample_image = (
+                            cue_color_queue.get(timeout=0.1)
+                        )
+                    except Empty:
+                        continue
+                    with self._cue_color_lock:
+                        if epoch != active_epoch:
+                            self.cue_color_reader.reset()
+                            active_epoch = epoch
+                        shooter = self.cue_color_reader.sample(
+                            sample_frame, sample_image  # type: ignore[arg-type]
+                        )
+                    if shooter is not None:
+                        self._accept_fast_shooter(shooter, sample_time)
 
             scoreboard_thread = Thread(
                 target=scoreboard_loop,
@@ -262,6 +331,12 @@ class YoutubeLiveWorker:
                 daemon=True,
             )
             scoreboard_thread.start()
+            cue_color_thread = Thread(
+                target=cue_color_loop,
+                name="cuecast-fast-cue-color-reader",
+                daemon=True,
+            )
+            cue_color_thread.start()
             # YOLO 중심 좌표의 프레임 간 지터가 테이블 폭의 0.4%(0.004)를 쉽게
             # 넘겨 정지 확정이 거의 안 잡히던 문제를 완화한다. 임계를 1.0%까지
             # 올리고 안정 창을 0.3초로 줄여 확정 빈도와 반응 속도를 높인다.
@@ -350,14 +425,15 @@ class YoutubeLiveWorker:
                 if timestamp - last_scoreboard_sample >= 0.25:
                     last_scoreboard_sample = timestamp
                     item = (scoreboard_epoch, frame_number, timestamp, frame.copy())
-                    try:
-                        scoreboard_queue.put_nowait(item)
-                    except Full:
+                    for sample_queue in (scoreboard_queue, cue_color_queue):
                         try:
-                            scoreboard_queue.get_nowait()
-                        except Empty:
-                            pass
-                        scoreboard_queue.put_nowait(item)
+                            sample_queue.put_nowait(item)
+                        except Full:
+                            try:
+                                sample_queue.get_nowait()
+                            except Empty:
+                                pass
+                            sample_queue.put_nowait(item)
                 # 5e0cabe pipeline: acquire the table corners once from the first
                 # plausible top view, validate that reference on every frame, and
                 # use best_3cls.pt YOLO detections for the ball coordinates.
@@ -480,5 +556,7 @@ class YoutubeLiveWorker:
             scoreboard_stop.set()
             if scoreboard_thread is not None:
                 scoreboard_thread.join(timeout=1.0)
+            if cue_color_thread is not None:
+                cue_color_thread.join(timeout=1.0)
             if capture is not None:
                 capture.release()
