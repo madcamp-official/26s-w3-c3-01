@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from cuecast_yolo.shot_probability import (
     BootstrapProbabilityModel,
@@ -24,7 +25,11 @@ from cuecast_yolo.symmetric_probability import (
     load_calibration,
 )
 from cuecast_yolo.live_youtube import YoutubeLiveWorker
-from cuecast_yolo.match_probability import predict_match_probability
+from cuecast_yolo.prematch_probability import (
+    PrematchDataError,
+    PrematchService,
+    create_prematch_service,
+)
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -142,6 +147,7 @@ class DetectionStore:
 
 def create_handler(
     service: ProbabilityService,
+    prematch_service: PrematchService,
     ui_path: Path,
     extension_dir: Path,
     detections: DetectionStore,
@@ -168,10 +174,54 @@ def create_handler(
                 raise ValueError("JSON object required")
             return payload
 
+        def _send_bytes(self, body: bytes, content_type: str) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:  # noqa: N802
-            path = self.path.split("?", 1)[0]
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
             if path == "/api/v1/health":
-                self._send_json(service.health())
+                self._send_json({**service.health(), "prematchSource": prematch_service.source})
+                return
+            if path == "/api/v1/prematch/players":
+                try:
+                    league = query.get("league", ["PBA"])[0]
+                    active_only = query.get("active_only", ["true"])[0].casefold() != "false"
+                    players = prematch_service.list_players(league, active_only)
+                    self._send_json(
+                        {
+                            "league": league.upper(),
+                            "seasonCode": 2026,
+                            "dataSource": prematch_service.source,
+                            "players": players,
+                        }
+                    )
+                except PrematchDataError as error:
+                    self._send_json(
+                        {"error": "prematch_data_unavailable", "detail": str(error)},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                return
+            if path.startswith("/api/v1/players/") and path.endswith("/image"):
+                try:
+                    player_code = unquote(path.removeprefix("/api/v1/players/").removesuffix("/image").strip("/"))
+                    league = query.get("league", ["PBA"])[0]
+                    image = prematch_service.repository.get_player_image(player_code, league)
+                    if image is None:
+                        self._send_json({"error": "image_not_found"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self._send_bytes(image[0], image[1])
+                except PrematchDataError as error:
+                    self._send_json(
+                        {"error": "prematch_data_unavailable", "detail": str(error)},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
                 return
             if path == "/api/v1/detection/latest":
                 self._send_json(detections.get())
@@ -247,21 +297,7 @@ def create_handler(
                     self._send_json(stored, HTTPStatus.CREATED)
                     return
                 if path == "/api/v1/match-probability":
-                    stats_a = payload.get("stats_a", {})
-                    stats_b = payload.get("stats_b", {})
-                    if not isinstance(stats_a, dict) or not isinstance(stats_b, dict):
-                        raise ValueError("stats_a와 stats_b는 JSON 객체여야 합니다")
-                    self._send_json(
-                        predict_match_probability(
-                            str(payload["player_a"]),
-                            str(payload["player_b"]),
-                            float(payload.get("avg_a", stats_a.get("AVG"))),
-                            float(payload.get("avg_b", stats_b.get("AVG"))),
-                            sets_to_win=int(payload.get("sets_to_win", 4)),
-                            stats_a=stats_a,
-                            stats_b=stats_b,
-                        )
-                    )
+                    self._send_json(prematch_service.predict(payload))
                     return
                 if path == "/api/v1/youtube/info":
                     video = video_analyzer.resolve(str(payload["url"]))
@@ -323,6 +359,11 @@ def create_handler(
                     self._send_json(live_worker.status())
                     return
                 self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+            except PrematchDataError as error:
+                self._send_json(
+                    {"error": "prematch_prediction_failed", "detail": str(error)},
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 self._send_json(
                     {"error": "invalid_request", "detail": str(error)},
@@ -433,8 +474,10 @@ def main() -> None:
         publish_live_layout,
         scoreboard_callback=detections.put_scoreboard,
     )
+    prematch_service = create_prematch_service()
     handler = create_handler(
         service,
+        prematch_service,
         args.ui.resolve(),
         args.extension.resolve(),
         detections,
@@ -444,7 +487,8 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(
         f"CueCast local UI: http://{args.host}:{args.port} | "
-        f"records={len(service.records)} | model={service.model.version}"
+        f"records={len(service.records)} | model={service.model.version} | "
+        f"prematch={prematch_service.source}"
     )
     try:
         server.serve_forever()
