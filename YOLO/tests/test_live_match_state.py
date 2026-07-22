@@ -133,6 +133,21 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
         self.assertEqual(ready["result"]["setsWonA"], 1)
         self.assertEqual(ready["result"]["unknownCompletedSets"], 1)
 
+    def test_prematch_probability_is_available_before_shot_probability_is_known(
+        self,
+    ) -> None:
+        coordinator = LiveMatchCoordinator(_Provider())
+        status = coordinator.update_scoreboard(_scoreboard())
+        self.assertEqual(status["state"], "waiting")
+        self.assertIsNone(status["result"])
+        self.assertEqual(status["prematch"]["prematchMatchProbabilityA"], 0.5)
+        self.assertEqual(status["prematch"]["playerA"]["name"], "김영원")
+        self.assertEqual(status["prematch"]["playerB"]["name"], "김규준")
+        # 폴링에 쓰이는 status()도 (직접 반환값이 아니라) 같은 미리보기를 들고 있어야 한다.
+        self.assertEqual(
+            coordinator.status()["prematch"]["playerA"]["name"], "김영원"
+        )
+
     def test_manual_names_are_used_for_database_lookup(self) -> None:
         provider = _Provider()
         coordinator = LiveMatchCoordinator(provider)

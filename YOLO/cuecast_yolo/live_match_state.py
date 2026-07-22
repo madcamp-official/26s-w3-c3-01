@@ -132,8 +132,12 @@ class LiveMatchCoordinator:
         with self._lock:
             return dict(self._status)
 
-    def _waiting(self, detail: str) -> dict[str, object]:
+    def _waiting(
+        self, detail: str, *, prematch: dict[str, object] | None = None
+    ) -> dict[str, object]:
         self._status = {"state": "waiting", "detail": detail, "result": None}
+        if prematch is not None:
+            self._status["prematch"] = prematch
         return dict(self._status)
 
     def _calculate_locked(self) -> dict[str, object]:
@@ -149,16 +153,6 @@ class LiveMatchCoordinator:
         )
         if not all(isinstance(name, str) and name.strip() for name in names):
             return self._waiting("선수 이름 OCR 대기 중")
-        if self._shot_probability is None:
-            return self._waiting("현재 포메이션 성공률 대기 중")
-        current_player = self._player_for_color(scoreboard, self._shot_color)
-        if current_player is None:
-            current_player = self._player_for_color(
-                scoreboard, scoreboard.get("activeColor")
-            )
-        if current_player is None:
-            return self._waiting("현재 공격자 판독 대기 중")
-        starting_player = self._set_starting_player or current_player
         set_number = int(scoreboard.get("set", 1))
         try:
             db_inputs = self.provider.fetch(
@@ -175,6 +169,39 @@ class LiveMatchCoordinator:
                 for value in (player_a, player_b, match_format)
             ):
                 raise RuntimeError("DB 입력 형식이 올바르지 않습니다")
+        except Exception as error:
+            self._status = {
+                "state": "error",
+                "detail": str(error),
+                "result": None,
+            }
+            return dict(self._status)
+        # 경기 전 승률(선수 전적 기반)은 샷 추적과 무관하게 이름만 확정되면 바로 계산되므로,
+        # 상단 실시간 게이지가 아직 대기 중이어도 "prematch"로 미리 노출한다.
+        prematch_preview = {
+            "prematchMatchProbabilityA": float(
+                db_inputs.get("prematchProbabilityA", 0.5)
+            ),
+            "playerA": player_a,
+            "playerB": player_b,
+            "prematchSource": db_inputs.get("prematchSource", "dummy"),
+            "dataSource": db_inputs.get("dataSource", "server_db"),
+        }
+        if self._shot_probability is None:
+            return self._waiting(
+                "현재 포메이션 성공률 대기 중", prematch=prematch_preview
+            )
+        current_player = self._player_for_color(scoreboard, self._shot_color)
+        if current_player is None:
+            current_player = self._player_for_color(
+                scoreboard, scoreboard.get("activeColor")
+            )
+        if current_player is None:
+            return self._waiting(
+                "현재 공격자 판독 대기 중", prematch=prematch_preview
+            )
+        starting_player = self._set_starting_player or current_player
+        try:
             result = predict_live_match_probability(
                 prematch_probability_a=float(
                     db_inputs.get("prematchProbabilityA", 0.5)
