@@ -131,6 +131,21 @@ tail -30 ~/app/logs_fastapi.log        # FastAPI 로그
 cd ~/app && git pull && ~/app/run_services.sh
 ```
 
+### 로컬(맥)에서 CueCast 실행 (`./run_cuecast_local.sh`)
+```bash
+./run_cuecast_local.sh   # http://127.0.0.1:8765 (Ctrl+C 로 종료)
+```
+- 캠퍼스망은 RDS(5432) 직접 접속을 막기 때문에, 스크립트가 `billiard` SSH 별칭(EC2 경유)으로
+  `localhost:15432 → RDS` 터널을 **자동으로 열고**, 종료 시 자동으로 정리한다.
+- 경기 전 승률·선수 검색까지 쓰려면 최초 1회만 준비 (git에는 포함 안 됨, 각자 로컬 설정):
+  1. `~/.ssh/config`에 `Host billiard`(EC2 접속 정보) 등록
+  2. `YOLO/.env`에 아래 한 줄 추가 (비밀번호는 팀원에게 받기)
+     ```
+     DATABASE_URL=postgres://<user>:<password>@localhost:15432/billiard
+     ```
+- 위 둘 중 하나라도 없으면 에러 없이 **DB 기능만 비활성화**된 채로 계속 실행된다
+  (유튜브 실시간 분석·성공확률 계산은 DB 없이도 정상 동작).
+
 ---
 
 ## 5. CueCast 웹 사용법 (터널 주소 접속 후)
@@ -158,6 +173,7 @@ cd ~/app && git pull && ~/app/run_services.sh
 | 새 데이터가 확률에 반영 안 됨 | 서버 재시작 필요 → `~/app/run_services.sh` |
 | 맥에서 RDS/psql 접속 불가 | 정상 (캠퍼스망 5432 차단) → 데이터 확인은 S3 export 또는 pgweb/터널 |
 | 맥에서 `ssh` EC2 접속 불가 | 정상 (캠퍼스망 22 차단) → **EC2 Instance Connect**(브라우저 터미널) 사용 |
+| 로컬 CueCast에서 선수 검색/경기 전 승률이 계속 로딩만 됨 | `DATABASE_URL`이 RDS로 직결되어 타임아웃 중 → §4 "로컬(맥)에서 CueCast 실행" 참고, `YOLO/.env`를 `localhost:15432`(SSH 터널) 경유로 설정 |
 | EC2 디스크 부족 | `sudo docker image prune -a -f`, pip `--no-cache-dir`, EBS 확장(무료 30GB까지) |
 
 ---
