@@ -211,3 +211,90 @@ GET /api/v1/prematch/players?league=PBA&active_only=true
       "last10Matches": 10,
       "last10Wins": 6
     },
+    "performanceScore": 0.35,
+    "performanceInnings": 200,
+    "metrics": {
+      "AVG": 1.5,
+      "TS": 55.0,
+      "BRS": 48.2,
+      "5HS": 13.1,
+      "HR": 10
+    },
+    "imageUrl": "/api/v1/players/M0017784/image?league=PBA",
+    "imageIsPlaceholder": false
+  },
+  "playerB": {
+    "winProbability": 0.387
+  },
+  "componentProbabilities": {
+    "elo": 0.61,
+    "career": 0.58,
+    "season": 0.5,
+    "recent": 0.56,
+    "performance": 0.64
+  },
+  "componentConfidences": {
+    "elo": 1.0,
+    "career": 1.0,
+    "season": 0.0,
+    "recent": 1.0,
+    "performance": 1.0
+  },
+  "baseWeights": {
+    "elo": 0.3,
+    "career": 0.175,
+    "season": 0.05,
+    "recent": 0.025,
+    "performance": 0.45
+  },
+  "finalWeights": {},
+  "confidence": {
+    "score": 0.95,
+    "level": "high"
+  },
+  "keyFactors": [],
+  "headToHead": {},
+  "headToHeadIncludedInProbability": false
+}
+```
+
+#### 규칙
+
+- 같은 선수 코드는 거부합니다.
+- PBA와 LPBA 선수는 교차 계산하지 않습니다.
+- A/B 승률 합은 1입니다.
+- 상대 전적은 반환하지만 현재 최종 확률에는 포함하지 않습니다.
+
+---
+
+## 6. 샷 성공률 및 검출 API
+
+### 6.1 `POST /api/v1/shot-probability`
+
+#### 요청
+
+```json
+{
+  "shooter": "white",
+  "before": {
+    "white": [0.5583, 0.9381],
+    "yellow": [0.2336, 0.7072],
+    "red": [0.9643, 0.3434]
+  },
+  "position_error_mm": 25,
+  "prediction_id": "optional-client-id"
+}
+```
+
+| 필드 | 필수 | 설명 |
+|---|---:|---|
+| `shooter` | Y | `white` 또는 `yellow` |
+| `before.white` | Y | 흰 공 `[x, y]` |
+| `before.yellow` | Y | 노란 공 `[x, y]` |
+| `before.red` | Y | 빨간 공 `[x, y]` |
+| `position_error_mm` | N | 좌표 오차, 기본 25mm |
+| `prediction_id` | N | 호출 추적용 ID |
+
+#### 응답 대표 필드
+
+```json
