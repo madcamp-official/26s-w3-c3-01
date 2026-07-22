@@ -8,3 +8,4 @@ datasets/
 !weights/best_3cls.pt
 *.onnx
 *.mp4
+.env

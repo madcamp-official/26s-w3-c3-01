@@ -92,6 +92,14 @@ python local_probability_server.py
 두 환경변수가 모두 없거나 선수의 `AVG`가 없으면 임의 값으로 계산하지 않고 UI에
 연결 오류를 표시한다.
 
+RDS가 VPC 내부 접속만 허용하는 로컬 개발 환경에서는 SSH 터널과 서버를 함께 실행한다.
+`.env`의 `DATABASE_URL` 호스트는 `127.0.0.1:15432`를 사용한다.
+
+```powershell
+cd YOLO
+.\start_with_ssh_tunnel.ps1
+```
+
 추가 API:
 
 - `GET /api/v1/live-match-probability/latest`: 최신 실시간 경기 승률 조회

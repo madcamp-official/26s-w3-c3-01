@@ -9,6 +9,8 @@ from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from dotenv import load_dotenv
+
 from cuecast_yolo.shot_probability import (
     BootstrapProbabilityModel,
     CatBoostCoordinateModel,
@@ -242,6 +244,13 @@ def create_handler(
             if path == "/api/v1/live-match-probability/latest":
                 self._send_json(live_match.status())
                 return
+            if path in ("/assets/logo.png", "/assets/home.png"):
+                image_path = ui_path.parent / "assets" / Path(path).name
+                if image_path.exists():
+                    self._send_bytes(image_path.read_bytes(), "image/png")
+                else:
+                    self._send_json({"error": "asset_not_found"}, HTTPStatus.NOT_FOUND)
+                return
             if path in ("/", "/index.html"):
                 body = ui_path.read_bytes()
                 self.send_response(HTTPStatus.OK)
@@ -453,6 +462,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_dotenv(Path(__file__).resolve().with_name(".env"))
     args = parse_args()
     service = ProbabilityService(
         args.shots.resolve(), args.model.resolve(), args.calibration.resolve()

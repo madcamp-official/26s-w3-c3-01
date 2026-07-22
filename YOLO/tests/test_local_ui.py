@@ -5,6 +5,8 @@ import unittest
 
 
 UI = Path(__file__).resolve().parents[1] / "ui" / "index.html"
+LOGO = UI.parent / "assets" / "logo.png"
+FAVICON = UI.parent / "assets" / "home.png"
 
 
 class LocalUiTest(unittest.TestCase):
@@ -21,6 +23,13 @@ class LocalUiTest(unittest.TestCase):
             "reset-player-names",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
+
+    def test_cuecast_logo_is_used_in_the_site_header(self) -> None:
+        self.assertTrue(LOGO.is_file())
+        self.assertTrue(FAVICON.is_file())
+        self.assertIn('class="brand"', self.html)
+        self.assertIn('src="/assets/logo.png"', self.html)
+        self.assertIn('rel="icon" type="image/png" href="/assets/home.png"', self.html)
 
     def test_manual_names_are_saved_per_youtube_video(self) -> None:
         self.assertIn("cuecast-player-names:${id}", self.html)
