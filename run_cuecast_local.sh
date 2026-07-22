@@ -44,8 +44,10 @@ fi
 #     비밀번호는 여기 없다 — DATABASE_URL은 각자 로컬의 YOLO/.env 에서 dotenv 로 읽는다.
 echo "[2/3] RDS 접속 터널 확인 중 (localhost:${TUNNEL_PORT}) ..."
 TUNNEL_PID=""
+TUNNEL_READY=0
 if lsof -iTCP:"$TUNNEL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "  -> 이미 열려 있음, 재사용"
+  TUNNEL_READY=1
 elif ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_ALIAS" true 2>/dev/null; then
   echo "  ! '${SSH_ALIAS}' SSH 접속 불가 — DB 없이 진행 (경기 전 승률/선수 검색 비활성)"
 else
@@ -59,12 +61,27 @@ else
   done
   if lsof -iTCP:"$TUNNEL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "  -> 터널 열림"
+    TUNNEL_READY=1
   else
     echo "  ! 터널이 열리지 않음 — DB 없이 진행"
     TUNNEL_PID=""
   fi
 fi
 trap 'if [ -n "$TUNNEL_PID" ]; then kill "$TUNNEL_PID" 2>/dev/null || true; fi' EXIT
+
+# --- DATABASE_URL 정리 ---
+# db/db.env 등을 source 한 터미널에서 실행하면 DATABASE_URL이 RDS 직결로 export되어 있는데,
+# load_dotenv 는 기존 env 를 덮어쓰지 않으므로 그대로 두면 캠퍼스망에서 쿼리가 멈춘다(타임아웃).
+# 여기서 셸 상속 DATABASE_URL 을 상황에 맞게 교정한다.
+if printf '%s' "${DATABASE_URL:-}" | grep -q "@${RDS_HOST}:5432"; then
+  if [ "$TUNNEL_READY" = "1" ]; then
+    export DATABASE_URL="$(printf '%s' "$DATABASE_URL" | sed "s|@${RDS_HOST}:5432|@localhost:${TUNNEL_PORT}|")"
+    echo "  -> 셸의 RDS 직결 DATABASE_URL 을 터널 경유(localhost:${TUNNEL_PORT})로 교정"
+  else
+    unset DATABASE_URL
+    echo "  ! 셸의 RDS 직결 DATABASE_URL 을 해제 (터널 없이는 접속 불가 → DB 없이 진행)"
+  fi
+fi
 
 # --- 3) CueCast 기동 (CatBoost 학습에 수십 초) ---
 echo "[3/3] CueCast 기동 중 -> http://127.0.0.1:8765   (Ctrl+C 로 종료)"
