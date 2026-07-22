@@ -130,9 +130,10 @@ class LocalUiTest(unittest.TestCase):
         for element_id in (
             "live-match-probability-a",
             "live-match-probability-b",
-            "live-set-probability",
-            "live-match-change",
-            "live-shot-conditions",
+            "live-prematch-name-a",
+            "live-prematch-prob-a",
+            "live-prematch-name-b",
+            "live-prematch-prob-b",
             "live-match-source",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
