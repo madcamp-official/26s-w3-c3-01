@@ -104,6 +104,9 @@ venv/bin/python src/extract_turns.py videos/영상.mp4 --outdir results/영상ID
 
 엔진 코드는 `src/` 에, 실행·유틸(DB·배포)은 각 폴더에 있다.
 
+경기 전 선수 승률 예측의 계산식, 데이터 적재, API 실행 방법은
+[docs/PREMATCH_PROBABILITY.md](docs/PREMATCH_PROBABILITY.md)를 참고한다.
+
 | 파일 (`src/`) | 역할 |
 |---|---|
 | `detect_pipeline.py` | 당구대 꼭짓점 검출 + 픽셀→정규화 좌표 변환 |
