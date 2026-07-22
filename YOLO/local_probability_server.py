@@ -532,11 +532,21 @@ def main() -> None:
         )
 
     def publish_scoreboard(scoreboard: dict[str, object]) -> None:
+        if scoreboard_names.locked:
+            resolved = scoreboard_names.match(scoreboard)
+            detections.put_scoreboard(resolved)
+            live_match.update_scoreboard(resolved)
+            return
+        # Publish OCR output first so the UI never waits on a PostgreSQL player
+        # lookup. The second publish replaces only the names with their locked
+        # DB matches while preserving the already-visible score fields.
+        detections.put_scoreboard(scoreboard)
         try:
             resolved = scoreboard_names.match(scoreboard)
         except PrematchDataError:
             resolved = scoreboard
-        detections.put_scoreboard(resolved)
+        if resolved != scoreboard:
+            detections.put_scoreboard(resolved)
         live_match.update_scoreboard(resolved)
 
     live_worker = YoutubeLiveWorker(

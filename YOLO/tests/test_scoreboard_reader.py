@@ -141,7 +141,7 @@ class PbaScoreboardReaderTest(unittest.TestCase):
         result = state.update(ScoreboardReading(2, 7, 4, 5, 0, 0))
         self.assertIsNone(result)
 
-    def test_realtime_reader_confirms_scores_and_active_cue_twice(self) -> None:
+    def test_realtime_reader_publishes_scores_and_active_run_immediately(self) -> None:
         reader = RealtimePbaScoreboardReader(
             _SequenceRecognizer([]),
             _SequenceRecognizer([1, 3, 1, 3, 1, 3, 1, 3]),
@@ -170,6 +170,8 @@ class PbaScoreboardReaderTest(unittest.TestCase):
 
         self.assertEqual(immediate_run.player1_run, 2)
         self.assertIsNone(immediate_run.player2_run)
+        self.assertEqual(immediate_run.player1_score, 5)
+        self.assertEqual(immediate_run.player2_score, 2)
         self.assertEqual(scores.player1_score, 5)
         self.assertEqual(scores.player2_score, 2)
         self.assertIsNone(scores.set_number)
@@ -195,13 +197,36 @@ class PbaScoreboardReaderTest(unittest.TestCase):
             "_read_colored",
             side_effect=lambda _frame, _box, color: 5 if color == "white" else 2,
         ):
-            self.assertIsNone(reader.sample(1, frame))
-            result = reader.sample(2, frame)
+            result = reader.sample(1, frame)
+            self.assertIsNone(reader.sample(2, frame))
 
         self.assertEqual(result.player1_score, 5)
         self.assertEqual(result.player2_score, 2)
         self.assertIsNone(result.inning)
         self.assertIsNone(result.set_number)
+
+    def test_realtime_reader_accepts_score_increase_once_and_rejects_regression(self) -> None:
+        reader = RealtimePbaScoreboardReader(
+            _SequenceRecognizer([]),
+            name_recognizer=lambda _image: None,
+        )
+        reader.box_white = (70, 30, 11, 14)
+        reader.box_yellow = (70, 44, 11, 14)
+        frame = np.full((80, 120, 3), 128, np.uint8)
+        white_scores = iter((1, 2, 1))
+
+        def score(_frame, _box, color):
+            return next(white_scores) if color == "white" else 0
+
+        with patch.object(reader, "_read_colored", side_effect=score):
+            initial = reader.sample(1, frame)
+            increased = reader.sample(2, frame)
+            regressed = reader.sample(3, frame)
+
+        self.assertEqual(initial.player1_score, 1)
+        self.assertEqual(increased.player1_score, 2)
+        self.assertIsNone(regressed)
+        self.assertEqual(reader._committed["white_score"], 2)
 
     def test_two_detected_run_rows_are_hidden_and_force_recheck(self) -> None:
         reader = RealtimePbaScoreboardReader(_SequenceRecognizer([]))

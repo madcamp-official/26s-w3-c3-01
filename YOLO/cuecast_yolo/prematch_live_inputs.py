@@ -58,6 +58,11 @@ class LockedScoreboardPlayerMatcher:
             self._generation += 1
             self._fixed = {}
 
+    @property
+    def locked(self) -> bool:
+        with self._lock:
+            return len(self._fixed) == 2
+
     def match(self, scoreboard: dict[str, object]) -> dict[str, object]:
         with self._lock:
             generation = self._generation

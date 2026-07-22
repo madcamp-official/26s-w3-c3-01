@@ -757,6 +757,15 @@ class RealtimePbaScoreboardReader:
         self._pending.pop(key, None)
         return True
 
+    def _confirm_score(self, key: str, value: object | None) -> bool:
+        """Publish a non-regressing score immediately after one OCR read."""
+        if value is None or self._committed.get(key) == value:
+            self._pending.pop(key, None)
+            return False
+        self._committed[key] = value
+        self._pending.pop(key, None)
+        return True
+
     def _committed_reading(self) -> ScoreboardReading:
         assert self.box_white is not None and self.box_yellow is not None
         row1_color = (
@@ -908,7 +917,9 @@ class RealtimePbaScoreboardReader:
 
         committed_changed = run_changed or run_cleared
         for key, value in values.items():
-            if key == "set":
+            if key in ("white_score", "yellow_score"):
+                confirm = self._confirm_score
+            elif key == "set":
                 confirm = self._confirm_set
             else:
                 confirm = self._confirm

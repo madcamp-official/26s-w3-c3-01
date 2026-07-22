@@ -68,8 +68,10 @@ class PrematchLiveInputProviderTest(unittest.TestCase):
         matcher = LockedScoreboardPlayerMatcher(provider)
 
         first = matcher.match({"player1Name": "김영윈", "player2Name": "김규쥰"})
+        self.assertTrue(matcher.locked)
         locked = matcher.match({"player1Name": "조재호", "player2Name": "조건휘"})
         matcher.reset()
+        self.assertFalse(matcher.locked)
         refreshed = matcher.match({"player1Name": "조재호", "player2Name": "조건휘"})
 
         self.assertEqual(first["player1Name"], "김영원")
