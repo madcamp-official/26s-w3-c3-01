@@ -145,3 +145,86 @@ flowchart LR
 상세 화면 상태와 전환 조건은 [화면 설계서](docs/screen-design.md)를 참고합니다.
 
 ### 데이터 구조
+
+| 스키마 / 테이블 | 역할 |
+|---|---|
+| `public.billiard_turns` | 영상에서 추출한 샷 직전·직후 공 좌표와 성공 라벨 |
+| `public.billiard_ingest_log` | 영상 단위 DB 적재 이력 |
+| `cuecast.player_master` | 2026 서비스용 선수 마스터와 이미지 메타데이터 |
+| `cuecast.player_runtime_state` | 2026 개막 직전 Elo·통산·최근·세부 경기력 스냅샷 |
+| `cuecast.season_player_state` | 2026 시즌 진행에 따라 갱신되는 선수 누적 상태 |
+| `cuecast.matches` | 과거 및 2026 시즌 경기 결과 |
+| `cuecast.player_match_detail_stats` | 선수별 경기 세부 기록 |
+| `prematch_*` | 경기 전 승률 API가 빠르게 조회하는 서비스용 투영 테이블 |
+
+세부 컬럼, 관계와 중복 스키마의 역할은 [DB 스키마 문서](docs/database-schema.md)를 참고합니다.
+
+### API / 외부 서비스 연동
+
+| Method / 방식 | Endpoint / 서비스 | 설명 |
+|---|---|---|
+| REST | `GET /api/v1/health` | 모델·데이터·경기 전 DB 연결 상태 확인 |
+| REST | `GET /api/v1/prematch/players` | PBA·LPBA 선수 목록 조회 |
+| REST | `POST /api/v1/match-probability` | 경기 전 두 선수 승률 계산 |
+| REST | `POST /api/v1/shot-probability` | 현재 세 공 좌표의 샷 성공률 계산 |
+| REST | `POST /api/v1/youtube/live/start` | YouTube 실시간 분석 시작 |
+| REST | `GET /api/v1/detection/latest` | 최신 확정 공 배치·샷 확률·점수판 조회 |
+| REST | `GET /api/v1/live-match-probability/latest` | 최신 실시간 세트 승률 조회 |
+| SDK / CLI | `yt-dlp`, FFmpeg | YouTube 영상 정보 조회·다운로드·프레임 처리 |
+| ML / CV | Ultralytics YOLO, OpenCV, Tesseract | 공 검출, 좌표 변환, 점수판 OCR |
+| Cloud | AWS S3·EC2·RDS | 추출 결과 중계, 자동 적재, 데이터 저장 |
+
+전체 endpoint의 요청·응답과 오류 형식은 [API 명세서](docs/api-spec.md)를 참고합니다.
+
+### 확률 모델
+
+- **경기 전 승률:** Elo 30%, 통산 17.5%, 현재 시즌 5%, 최근 흐름 2.5%, 세부 경기력 45%를 데이터 신뢰도로 재가중
+- **샷 성공률:** 연속 좌표 모델, 유사 과거 배치, Adaptive Grid를 데이터 양과 좌표 오차에 따라 결합
+- **실시간 세트 승률:** 경기 전 승률에서 얻은 선수 기본 능력과 현재 점수·공격권·현재 샷 성공률을 결합
+
+세부 계산은 [경기 전 승률 문서](docs/PREMATCH_PROBABILITY.md)와 [샷 성공률 모델 문서](YOLO/PROBABILITY_MODEL.md)를 참고합니다.
+
+---
+
+## 산출물 및 실행 방법
+
+- **산출물 설명:** Python 기반 영상 분석·확률 서버와 정적 웹 UI, PostgreSQL 데이터베이스, AWS 자동 적재 파이프라인
+- **실행 환경:** macOS 권장, Python 3.11 또는 3.12, OpenCV 4.x, FFmpeg, yt-dlp, PostgreSQL 및 **별도 설치된 Tesseract 실행 프로그램**
+- **기본 접속 주소:** `http://127.0.0.1:8765`
+- **시연 이미지:** 추후 `docs/images/` 또는 README 상단에 실시간 분석 화면, 선수 비교 화면, 시스템 아키텍처 이미지를 추가
+
+### 필수 시스템 프로그램 설치
+
+Python 패키지만 설치해서는 점수판 OCR이 동작하지 않습니다. 운영체제에 **Tesseract 실행 프로그램**을 별도로 설치하고 `PATH`에서 실행 가능해야 합니다.
+
+| 운영체제 | 설치 예시 |
+|---|---|
+| macOS | `brew install tesseract ffmpeg` |
+| Ubuntu / Debian | `sudo apt-get update && sudo apt-get install -y tesseract-ocr ffmpeg` |
+| Windows | Tesseract 설치 후 설치 폴더를 `PATH`에 추가하고 FFmpeg도 별도 설치 |
+
+설치 확인:
+
+```bash
+tesseract --version
+ffmpeg -version
+```
+
+Tesseract가 인식되지 않으면 점수판 OCR, 공격권 판정과 점수 변화 기반 실시간 승률 계산이 정상적으로 진행되지 않습니다.
+
+### 로컬 실행
+
+```bash
+# 저장소 루트
+cd 26s-w3-c3-01
+
+# 가상환경과 의존성
+python3.12 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -r YOLO/requirements.txt
+
+# CueCast 실행
+./run_cuecast_local.sh
+```
