@@ -228,3 +228,79 @@ pip install -r YOLO/requirements.txt
 # CueCast 실행
 ./run_cuecast_local.sh
 ```
+
+`run_cuecast_local.sh`는 다음 작업을 순서대로 수행합니다.
+
+1. EC2에서 최신 `billiard_turns_export.jsonl`을 가져옵니다.
+2. `YOLO/.env`의 `DATABASE_URL`을 사용해 RDS SSH 터널을 준비합니다.
+3. 샷 성공률 모델과 경기 전 승률 서비스를 로드합니다.
+4. 시스템 `PATH`에서 Tesseract와 FFmpeg를 확인합니다.
+5. `http://127.0.0.1:8765`에서 웹 UI와 API를 실행합니다.
+
+### 현재 실행 및 배포 제약
+
+- 현재 완전히 검증된 실행 방식은 `run_cuecast_local.sh`를 사용하는 로컬 실행입니다.
+- 배포 환경에서 YouTube URL을 이용한 영상 접근과 DB 연동을 동시에 수행할 때 접근 거부 오류가 발생해, 웹에 배포된 단일 서버만으로 전체 기능을 제공하지 못했습니다.
+- 접근 거부의 세부 원인은 실행 환경의 네트워크 정책, YouTube 요청 제한, DB 보안 그룹 또는 자격증명 설정에 따라 달라질 수 있습니다.
+- 발표와 기능 검증에서는 로컬 분석 서버와 EC2 SSH 터널을 통해 RDS를 연결합니다.
+- Tesseract는 pip 패키지가 아니라 운영체제 프로그램이므로 배포 환경에도 실행 파일과 `PATH` 설정이 별도로 필요합니다.
+
+### 영상 데이터 수집 파이프라인
+
+```bash
+echo "https://www.youtube.com/watch?v=XXXX" > jobs/pending/demo.txt
+source db/db.env
+venv/bin/python src/process_queue.py
+```
+
+처리 결과는 `results/<video_id>/`에 생성되고 S3에 업로드됩니다. EC2 loader가 주기적으로 RDS에 적재합니다.
+
+### 품질 검증
+
+```bash
+venv/bin/python -m unittest discover -s tests -v
+venv/bin/python -m unittest discover -s YOLO/tests -v
+bash deploy/verify_pipeline.sh
+```
+
+### 필수 환경변수
+
+`YOLO/.env`:
+
+```env
+DATABASE_URL=postgresql://<user>:<password>@localhost:15432/<database>
+```
+
+`db/db.env`:
+
+```env
+S3_BUCKET=<bucket-name>
+AWS_REGION=ap-northeast-2
+DATABASE_URL=postgresql://<user>:<password>@<rds-host>:5432/<database>
+```
+
+선택 환경변수:
+
+```env
+CUECAST_SSH_ALIAS=billiard
+CUECAST_RDS_HOST=<rds-host>
+CUECAST_TUNNEL_PORT=15432
+YTDLP_COOKIES=<cookies-file>
+```
+
+> 실제 DB 비밀번호, AWS 자격증명, 쿠키와 모델 외부 경로는 저장소에 커밋하지 않습니다.
+
+### 기술 구성
+
+| 분류 | 사용 기술 |
+|---|---|
+| 영상·Computer Vision | Python, OpenCV, Ultralytics YOLO, Tesseract OCR |
+| 확률 모델 | CatBoost, Logistic Regression, 유사 배치 가중치, Adaptive Grid |
+| 서버·API | Python `ThreadingHTTPServer`, JSON REST API |
+| 웹 UI | HTML, CSS, JavaScript, YouTube IFrame API |
+| 데이터베이스 | PostgreSQL, psycopg2 |
+| Cloud | AWS S3, EC2, RDS, IAM, cron |
+| 수집·미디어 | yt-dlp, FFmpeg |
+| 테스트·협업 | unittest, GitHub, Shell Script |
+
+---
