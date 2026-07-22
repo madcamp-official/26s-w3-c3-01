@@ -192,11 +192,16 @@ def load_shot_records(path: str | Path) -> list[ShotRecord]:
 
     unique: dict[str, ShotRecord] = {}
     for item in payload:
-        record = (
-            ShotRecord.from_db_dict(item)
-            if "video_id" in item and "shooter" in item
-            else ShotRecord.from_dict(item)
-        )
+        try:
+            record = (
+                ShotRecord.from_db_dict(item)
+                if "video_id" in item and "shooter" in item
+                else ShotRecord.from_dict(item)
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            label = item.get("video_id", "?"), item.get("turn", "?")
+            print(f"load_shot_records: skipping malformed record {label}: {exc}")
+            continue
         previous = unique.get(record.shot_id)
         if previous is not None and previous != record:
             raise ValueError(f"Conflicting duplicate shot id: {record.shot_id}")

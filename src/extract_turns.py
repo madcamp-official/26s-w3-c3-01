@@ -296,6 +296,11 @@ def _nearest_obs(seq, frame):
     return (x, y), abs(f - frame)
 
 
+def _layout_in_bounds(layout):
+    """레이아웃의 모든 공 좌표가 정규화 범위(0..1) 안에 있는지."""
+    return all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in layout.values())
+
+
 def _pos_at(still_log, obs, frame, tol):
     """frame 시점의 3구 좌표. ① frame 을 포함/근접(tol)하는 정지 배치(정확),
     ② 없으면 공별 최근접 관측(움직임 중일 수 있음). 반환 (layout|None, source).
@@ -425,6 +430,9 @@ def build_turns_from_scoreboard(reader, still_log, obs, tracked_frames, fps):
             miss = "before" if before is None else "after"
             dropped.append((f0, f1, color, f"{miss}_좌표없음"))
             continue                              # 정지 배치가 전무 → 좌표 없어 폐기
+        if not (_layout_in_bounds(before) and _layout_in_bounds(after)):
+            dropped.append((f0, f1, color, "좌표범위이탈"))
+            continue                              # 레일 근처 등에서 좌표가 테이블 밖으로 튐
         cov = ((bisect.bisect_left(tf, f1) - bisect.bisect_left(tf, f0))
                / max(f1 - f0, 1))
         det = {
@@ -654,8 +662,9 @@ def main():
         for i, t in enumerate(turns, 1):
             print(format_turn_log(i, t, fps))
         for f0, f1, color, reason in dropped:
-            print(f"  [폐기] 프레임 {f0}~{f1} 수구={color}: {reason} "
-                  f"(정지 배치를 못 찾아 좌표 확보 실패 → 라벨 제외)")
+            why = ("정지 배치를 못 찾아 좌표 확보 실패" if "좌표없음" in reason
+                   else "좌표가 테이블 범위(0..1) 밖으로 계산됨")
+            print(f"  [폐기] 프레임 {f0}~{f1} 수구={color}: {reason} ({why} → 라벨 제외)")
         if n_lowcov or n_far:
             print(f"  (참고: 저커버리지 {n_lowcov}개, 좌표원거리(obs_far) {n_far}개 — "
                   f"저장은 하되 품질 낮음)")
