@@ -137,3 +137,77 @@ GET /api/v1/prematch/players?league=PBA&active_only=true
   ]
 }
 ```
+
+---
+
+### 4.3 `GET /api/v1/players/{player_code}/image`
+
+#### Query Parameters
+
+| 이름 | 기본값 | 설명 |
+|---|---|---|
+| `league` | `PBA` | 선수 리그 |
+
+이미지가 있으면 저장된 MIME 타입으로 바이너리를 반환합니다. 없으면 다음을 반환합니다.
+
+```json
+{
+  "error": "image_not_found"
+}
+```
+
+---
+
+## 5. 경기 전 승률 API
+
+### 5.1 `POST /api/v1/match-probability`
+
+#### 요청
+
+```json
+{
+  "league": "PBA",
+  "season_code": 2026,
+  "player_a_code": "M0017784",
+  "player_b_code": "M0017160"
+}
+```
+
+| 필드 | 필수 | 설명 |
+|---|---:|---|
+| `league` | Y | `PBA` 또는 `LPBA` |
+| `season_code` | Y | 현재 서비스 기준 `2026` |
+| `player_a_code` | Y | 선수 A 코드 |
+| `player_b_code` | Y | 선수 B 코드 |
+
+#### 응답 주요 구조
+
+```json
+{
+  "modelVersion": "cuecast-prematch-linear-v1",
+  "predictionMethod": "confidence-adjusted-linear",
+  "league": "PBA",
+  "seasonCode": 2026,
+  "displayLabel": "A_ADVANTAGE",
+  "playerA": {
+    "code": "M0017784",
+    "name": "선수 A",
+    "shortName": "선수 A",
+    "winProbability": 0.613,
+    "elo": 1570.4,
+    "career": {
+      "matches": 40,
+      "wins": 25,
+      "losses": 15
+    },
+    "season": {
+      "matches": 0,
+      "wins": 0,
+      "losses": 0
+    },
+    "recent": {
+      "last5Matches": 5,
+      "last5Wins": 3,
+      "last10Matches": 10,
+      "last10Wins": 6
+    },
