@@ -58,3 +58,82 @@ HTTP `200`, 생성·저장은 `201`, 비동기 시작·동기화는 `202`를 사
 | `/api/v1/live-match-probability/latest` | 최신 실시간 세트 승률 |
 
 ### POST
+
+| Endpoint | 설명 |
+|---|---|
+| `/api/v1/shot-probability` | 세 공 좌표 기반 샷 성공률 |
+| `/api/v1/detection` | 외부 검출 결과 저장 및 확률 계산 |
+| `/api/v1/match-probability` | 경기 전 선수 승률 |
+| `/api/v1/youtube/info` | YouTube 영상 정보 |
+| `/api/v1/youtube/analyze` | 특정 시점 이전 안정 배치 분석 |
+| `/api/v1/youtube/live/start` | 실시간 분석 시작 |
+| `/api/v1/youtube/live/stop` | 실시간 분석 정지 |
+| `/api/v1/youtube/live/sync` | 재생 시점 동기화 |
+| `/api/v1/youtube/live/shooter` | 수구 수동 변경 |
+| `/api/v1/live-match/players` | 실시간 계산 선수 확정 |
+| `/api/v1/youtube/live/scoreboard/reset` | 점수·연속득점 OCR 상태 초기화 |
+
+---
+
+## 4. 상태 및 선수 API
+
+### 4.1 `GET /api/v1/health`
+
+서버가 로드한 샷 데이터와 모델을 확인합니다.
+
+#### 응답 예시
+
+```json
+{
+  "ok": true,
+  "records": 842,
+  "modelVersion": "symmetric-catboost-v2",
+  "engineVersion": "symmetric-hybrid-v2",
+  "prematchSource": "postgres"
+}
+```
+
+| 필드 | 설명 |
+|---|---|
+| `records` | 로드한 유효 샷 레코드 수 |
+| `modelVersion` | 좌표 모델 버전 |
+| `engineVersion` | 하이브리드 엔진 버전 |
+| `prematchSource` | `postgres`, `csv` 등 경기 전 데이터 소스 |
+
+---
+
+### 4.2 `GET /api/v1/prematch/players`
+
+#### Query Parameters
+
+| 이름 | 필수 | 기본값 | 설명 |
+|---|---:|---|---|
+| `league` | N | `PBA` | `PBA` 또는 `LPBA` |
+| `active_only` | N | `true` | `false`이면 비활성 선수도 포함 |
+
+#### 요청
+
+```http
+GET /api/v1/prematch/players?league=PBA&active_only=true
+```
+
+#### 응답 예시
+
+```json
+{
+  "league": "PBA",
+  "seasonCode": 2026,
+  "dataSource": "postgres",
+  "players": [
+    {
+      "code": "M0017784",
+      "name": "선수명",
+      "shortName": "선수명",
+      "league": "PBA",
+      "activeRoster": true,
+      "imageIsPlaceholder": false,
+      "imageUrl": "/api/v1/players/M0017784/image?league=PBA"
+    }
+  ]
+}
+```
