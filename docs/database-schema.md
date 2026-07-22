@@ -292,3 +292,92 @@ OCR 이름이나 다양한 표기를 선수 코드에 연결합니다.
 | `league_metric_baselines` | `prematch_league_metric_baselines` |
 
 ### 권장 갱신 순서
+
+1. 새 경기와 세부기록을 `cuecast.matches`, `cuecast.player_match_detail_stats`에 적재합니다.
+2. `cuecast.season_player_state`의 Elo와 시즌 누계를 갱신합니다.
+3. 최신 상태를 기반으로 새 `prematch_player_features.snapshot_at`을 생성합니다.
+4. API가 최신 snapshot을 읽는지 검증합니다.
+5. 모델·서버 캐시가 있다면 재시작 또는 명시적 갱신을 수행합니다.
+
+---
+
+## 7. 데이터 적재 명령
+
+### 7.0 DB 연결 전제
+
+로컬 통합 실행에서는 다음 연결 형태를 사용합니다.
+
+```text
+CueCast local server
+  → localhost:<tunnel-port>
+  → SSH alias / EC2
+  → private RDS PostgreSQL
+```
+
+- `DATABASE_URL`의 host는 로컬 터널 주소를 사용합니다.
+- RDS 보안 그룹을 전체 인터넷에 공개하지 않습니다.
+- YouTube 분석과 DB 조회가 모두 필요한 통합 화면은 현재 로컬 서버에서 실행합니다.
+- 배포 환경의 접근 거부가 해결되기 전에는 원격 단일 서버를 공식 실행 경로로 문서화하지 않습니다.
+
+### 7.1 영상 샷 데이터
+
+```bash
+psql "$DATABASE_URL" -f db/schema.sql
+python db/load_to_db.py --all
+```
+
+### 7.2 2026 선수 상세 데이터
+
+```bash
+psql "$DATABASE_URL" -f db/cuecast_schema.sql
+python db/load_players_dataset.py /path/to/final_dataset_2026_start
+```
+
+### 7.3 경기 전 서비스 데이터
+
+```bash
+psql "$DATABASE_URL" -f db/prematch_schema.sql
+python db/import_prematch_dataset.py /path/to/final_dataset_2026_start.zip
+```
+
+이미지 바이너리를 DB에 저장하지 않을 때:
+
+```bash
+python db/import_prematch_dataset.py /path/to/final_dataset_2026_start.zip --skip-images
+```
+
+---
+
+## 8. 운영 점검 쿼리
+
+```sql
+-- 샷 데이터 수
+SELECT count(*) FROM public.billiard_turns;
+
+-- 점수판 판정 외 데이터 확인
+SELECT success_method, count(*)
+FROM public.billiard_turns
+GROUP BY success_method;
+
+-- 최근 영상 적재
+SELECT * FROM public.billiard_ingest_log
+ORDER BY loaded_at DESC
+LIMIT 20;
+
+-- 리그별 활성 선수
+SELECT league, count(*)
+FROM prematch_players
+WHERE active_roster = true
+GROUP BY league;
+
+-- 선수별 최신 스냅샷
+SELECT DISTINCT ON (league, player_code)
+       league, player_code, snapshot_at, elo, season_matches
+FROM prematch_player_features
+ORDER BY league, player_code, snapshot_at DESC;
+
+-- 2026 운영 상태
+SELECT league, count(*), avg(elo_current)
+FROM cuecast.season_player_state
+GROUP BY league;
+```
