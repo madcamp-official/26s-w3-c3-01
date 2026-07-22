@@ -381,3 +381,30 @@ SELECT league, count(*), avg(elo_current)
 FROM cuecast.season_player_state
 GROUP BY league;
 ```
+
+---
+
+## 9. 무결성 및 보안 원칙
+
+- 선수의 고유 식별은 이름보다 `player_code`를 우선합니다.
+- 경기 고유 식별은 `match_uid`를 사용합니다.
+- 샷 중복은 `(video_id, turn)` PK와 upsert로 방지합니다.
+- 이미지·좌표 JSON과 원본 CSV 경로는 외부 입력이므로 경로 탈출과 형식 검증이 필요합니다.
+- DB 비밀번호와 AWS 자격증명은 `.env` 또는 인스턴스 역할로만 제공합니다.
+- 운영 데이터 변경 전 snapshot 또는 export를 보관합니다.
+- `cuecast.*`를 수정한 뒤 `prematch_*` 투영을 갱신하지 않으면 API 결과가 오래된 상태로 남을 수 있습니다.
+- 로컬 SSH 터널 포트와 RDS host를 혼용하지 않도록 `DATABASE_URL`을 실행 환경별로 분리합니다.
+- 접근 거부 문제를 우회하기 위해 RDS public access 또는 광범위한 보안 그룹 허용 규칙을 추가하지 않습니다.
+
+---
+
+## 10. 관련 파일
+
+- [`db/schema.sql`](../db/schema.sql)
+- [`db/cuecast_schema.sql`](../db/cuecast_schema.sql)
+- [`db/prematch_schema.sql`](../db/prematch_schema.sql)
+- [`db/load_to_db.py`](../db/load_to_db.py)
+- [`db/load_players_dataset.py`](../db/load_players_dataset.py)
+- [`db/import_prematch_dataset.py`](../db/import_prematch_dataset.py)
+- [데이터 계약](DATA_CONTRACT.md)
+- [경기 전 승률 계산](PREMATCH_PROBABILITY.md)
