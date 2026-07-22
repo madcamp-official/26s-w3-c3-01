@@ -26,6 +26,7 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("cuecast-player-names:${id}", self.html)
         self.assertIn("scoreboard.player1Name", self.html)
         self.assertIn("manualPlayerNames||lastDetectedPlayerNames", self.html)
+        self.assertIn("/api/v1/live-match/players", self.html)
 
     def test_youtube_title_is_not_used_as_player_name_fallback(self) -> None:
         self.assertNotIn("playerNamesFromTitle", self.html)
@@ -54,6 +55,20 @@ class LocalUiTest(unittest.TestCase):
         self.assertIn("cuecast-shot-history:${id}", self.html)
         self.assertIn("recordConfirmedShot(d)", self.html)
         self.assertIn("data.confirmedBefore", self.html)
+
+    def test_live_match_probability_uses_automatic_server_result(self) -> None:
+        for element_id in (
+            "live-match-probability-a",
+            "live-match-probability-b",
+            "live-set-probability",
+            "live-match-change",
+            "live-shot-conditions",
+            "live-match-source",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn("/api/v1/live-match-probability/latest", self.html)
+        self.assertIn("경기 전 A ${prematchA.toFixed(1)}%", self.html)
+        self.assertIn("DB AVG ${avgA.toFixed(3)}", self.html)
 
 
 if __name__ == "__main__":

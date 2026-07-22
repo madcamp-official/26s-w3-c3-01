@@ -25,11 +25,13 @@ from cuecast_yolo.symmetric_probability import (
     load_calibration,
 )
 from cuecast_yolo.live_youtube import YoutubeLiveWorker
+from cuecast_yolo.live_match_state import LiveMatchCoordinator
 from cuecast_yolo.prematch_probability import (
     PrematchDataError,
     PrematchService,
     create_prematch_service,
 )
+from cuecast_yolo.prematch_live_inputs import PrematchLiveInputProvider
 from cuecast_yolo.video_position_analyzer import VideoPositionAnalyzer
 
 
@@ -160,6 +162,7 @@ def create_handler(
     detections: DetectionStore,
     video_analyzer: VideoPositionAnalyzer,
     live_worker: YoutubeLiveWorker,
+    live_match: LiveMatchCoordinator,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, payload: object, status: int = HTTPStatus.OK) -> None:
@@ -235,6 +238,9 @@ def create_handler(
                 return
             if path == "/api/v1/youtube/live/status":
                 self._send_json(live_worker.status())
+                return
+            if path == "/api/v1/live-match-probability/latest":
+                self._send_json(live_match.status())
                 return
             if path in ("/", "/index.html"):
                 body = ui_path.read_bytes()
@@ -346,6 +352,7 @@ def create_handler(
                     if shooter not in ("white", "yellow"):
                         raise ValueError("shooter는 white 또는 yellow여야 합니다")
                     detections.clear()
+                    live_match.reset()
                     live_worker.start(
                         str(payload["url"]),
                         float(payload.get("timestamp_seconds", 0.0)),
@@ -364,6 +371,16 @@ def create_handler(
                 if path == "/api/v1/youtube/live/shooter":
                     live_worker.set_shooter(str(payload["shooter"]))
                     self._send_json(live_worker.status())
+                    return
+                if path == "/api/v1/live-match/players":
+                    player_a = payload.get("player_a")
+                    player_b = payload.get("player_b")
+                    self._send_json(
+                        live_match.set_player_names(
+                            str(player_a) if player_a is not None else None,
+                            str(player_b) if player_b is not None else None,
+                        )
+                    )
                     return
                 if path == "/api/v1/youtube/live/scoreboard/reset":
                     live_worker.reset_scoreboard()
@@ -444,6 +461,8 @@ def main() -> None:
     video_analyzer = VideoPositionAnalyzer(
         table_config=args.table.resolve(), model_path=args.ball_model.resolve()
     )
+    prematch_service = create_prematch_service()
+    live_match = LiveMatchCoordinator(PrematchLiveInputProvider(prematch_service))
 
     def publish_live_layout(
         positions: dict[str, tuple[float, float]],
@@ -470,6 +489,10 @@ def main() -> None:
                 }
             )
             prediction["shooterConfirmed"] = shooter_confirmed
+            if shooter_confirmed:
+                live_match.update_shot(
+                    float(prediction["successProbability"]), shooter
+                )
         detections.put(
             {
                 "before": before,
@@ -481,12 +504,15 @@ def main() -> None:
             }
         )
 
+    def publish_scoreboard(scoreboard: dict[str, object]) -> None:
+        detections.put_scoreboard(scoreboard)
+        live_match.update_scoreboard(scoreboard)
+
     live_worker = YoutubeLiveWorker(
         video_analyzer,
         publish_live_layout,
-        scoreboard_callback=detections.put_scoreboard,
+        scoreboard_callback=publish_scoreboard,
     )
-    prematch_service = create_prematch_service()
     handler = create_handler(
         service,
         prematch_service,
@@ -495,6 +521,7 @@ def main() -> None:
         detections,
         video_analyzer,
         live_worker,
+        live_match,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(
