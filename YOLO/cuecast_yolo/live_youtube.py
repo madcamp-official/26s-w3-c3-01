@@ -377,9 +377,9 @@ class YoutubeLiveWorker:
             cue_color_thread.start()
             # YOLO 중심 좌표의 프레임 간 지터가 테이블 폭의 0.4%(0.004)를 쉽게
             # 넘겨 정지 확정이 거의 안 잡히던 문제를 완화한다. 임계를 1.0%까지
-            # 올리고 안정 창을 0.3초로 줄여 확정 빈도와 반응 속도를 높인다.
+            # 올리고 안정 창을 0.5초로 설정해 정지 확정의 안정성을 높인다.
             stop_detector = BallStopDetector(
-                stable_seconds=0.3,
+                stable_seconds=0.5,
                 stop_threshold=0.010,
                 move_threshold=0.020,
             )

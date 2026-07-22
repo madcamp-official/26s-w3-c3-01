@@ -34,7 +34,6 @@ class _Provider:
 
 def _scoreboard(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "set": 1,
         "player1Score": 4,
         "player2Score": 3,
         "activeColor": "white",
@@ -61,7 +60,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
         ready = coordinator.update_shot(0.62, "white")
         self.assertEqual(ready["state"], "ready")
 
-    def test_partial_scoreboard_fields_are_merged_without_waiting_for_inning(self) -> None:
+    def test_scores_are_usable_without_set_or_inning(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
         coordinator.set_player_names("김영원", "김규준")
 
@@ -73,13 +72,10 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
             }
         )
         self.assertEqual(waiting["state"], "waiting")
-        self.assertIn("세트", waiting["detail"])
+        self.assertIn("포메이션", waiting["detail"])
 
         coordinator.update_scoreboard(
             {
-                "set": 1,
-                "player1Name": "김영원",
-                "player2Name": "김규준",
                 "activeColor": "white",
             }
         )
@@ -110,42 +106,20 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
         self.assertEqual(status["state"], "waiting")
         self.assertIn("포메이션", status["detail"])
 
-    def test_set_transition_tracks_winner_seen_in_current_session(self) -> None:
+    def test_live_probability_is_scoped_to_current_set(self) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
         coordinator.set_player_names("김영원", "김규준")
-        coordinator.update_scoreboard(_scoreboard(player1Score=15, player2Score=11))
-        coordinator.update_shot(0.6, "white")
-        coordinator.update_scoreboard(
-            _scoreboard(set=2, player1Score=0, player2Score=0, activeColor="yellow")
-        )
-        ready = coordinator.update_shot(0.55, "yellow")
-        self.assertEqual(ready["result"]["setsWonA"], 1)
-        self.assertEqual(ready["result"]["setsWonB"], 0)
-
-    def test_mid_match_start_is_marked_provisional(self) -> None:
-        coordinator = LiveMatchCoordinator(_Provider())
-        coordinator.set_player_names("김영원", "김규준")
-        coordinator.update_scoreboard(_scoreboard(set=3))
+        coordinator.update_scoreboard(_scoreboard())
         ready = coordinator.update_shot(0.55, "white")
-        self.assertTrue(ready["result"]["setScoreProvisional"])
-        self.assertEqual(ready["result"]["unknownCompletedSets"], 2)
-
-    def test_skipped_set_numbers_are_marked_unknown(self) -> None:
-        coordinator = LiveMatchCoordinator(_Provider())
-        coordinator.set_player_names("김영원", "김규준")
-        coordinator.update_scoreboard(_scoreboard(player1Score=15, player2Score=11))
-        coordinator.update_scoreboard(
-            _scoreboard(set=3, player1Score=0, player2Score=0)
-        )
-        ready = coordinator.update_shot(0.55, "white")
-        self.assertEqual(ready["result"]["setsWonA"], 1)
-        self.assertEqual(ready["result"]["unknownCompletedSets"], 1)
+        self.assertEqual(ready["result"]["probabilityScope"], "current_set")
+        self.assertEqual(ready["result"]["inputs"]["setsToWin"], 1)
+        self.assertIn("setWinProbabilityA", ready["result"])
 
     def test_prematch_probability_is_available_before_shot_probability_is_known(
         self,
     ) -> None:
         coordinator = LiveMatchCoordinator(_Provider())
-        status = coordinator.update_scoreboard(_scoreboard())
+        status = coordinator.set_player_names("김영원", "김규준")
         self.assertEqual(status["state"], "waiting")
         self.assertIsNone(status["result"])
         self.assertEqual(status["prematch"]["prematchMatchProbabilityA"], 0.5)
@@ -155,6 +129,7 @@ class LiveMatchCoordinatorTest(unittest.TestCase):
         self.assertEqual(
             coordinator.status()["prematch"]["playerA"]["name"], "김영원"
         )
+        self.assertEqual(coordinator._scoreboard, None)
 
     def test_manual_names_are_used_for_database_lookup(self) -> None:
         provider = _Provider()

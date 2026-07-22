@@ -100,6 +100,16 @@ class LiveMatchCoordinator:
                     )
                     if score_changed or player_changed:
                         self._shot_probability = None
+            elif previous is not None:
+                score_changed = any(
+                    previous.get(key) != merged.get(key)
+                    for key in ("player1Score", "player2Score")
+                )
+                player_changed = previous.get("activeColor") != merged.get(
+                    "activeColor"
+                )
+                if score_changed or player_changed:
+                    self._shot_probability = None
             self._scoreboard = merged
             current_player = self._player_for_color(
                 self._scoreboard, self._scoreboard.get("activeColor")
@@ -142,18 +152,12 @@ class LiveMatchCoordinator:
 
     def _calculate_locked(self) -> dict[str, object]:
         scoreboard = self._scoreboard
-        if scoreboard is None:
-            return self._waiting("점수판 인식 대기 중")
-        required_score_fields = ("set", "player1Score", "player2Score")
-        if any(scoreboard.get(key) is None for key in required_score_fields):
-            return self._waiting("세트와 점수 인식 대기 중")
-        names = self._manual_names or (
-            scoreboard.get("player1Name"),
-            scoreboard.get("player2Name"),
-        )
-        if not all(isinstance(name, str) and name.strip() for name in names):
+        names = self._manual_names
+        if names is None:
             return self._waiting("선수 이름 입력 대기 중")
-        set_number = int(scoreboard.get("set", 1))
+        # 세트 번호는 더 이상 점수판에서 읽지 않는다. 경기 전 승률은 이름만으로
+        # 즉시 계산하고, 실시간 세트 승률은 현재 점수와 수구가 준비되면 계산한다.
+        set_number = 1
         try:
             db_inputs = self.provider.fetch(
                 str(names[0]),
@@ -187,10 +191,13 @@ class LiveMatchCoordinator:
             "prematchSource": db_inputs.get("prematchSource", "dummy"),
             "dataSource": db_inputs.get("dataSource", "server_db"),
         }
-        if self._manual_names is None:
+        if scoreboard is None:
             return self._waiting(
-                "선수 이름 입력 대기 중", prematch=prematch_preview
+                "점수판 인식 대기 중", prematch=prematch_preview
             )
+        required_score_fields = ("player1Score", "player2Score")
+        if any(scoreboard.get(key) is None for key in required_score_fields):
+            return self._waiting("점수 인식 대기 중", prematch=prematch_preview)
         if self._shot_probability is None:
             return self._waiting(
                 "현재 포메이션 성공률 대기 중", prematch=prematch_preview
@@ -218,9 +225,9 @@ class LiveMatchCoordinator:
                 starting_player=starting_player,
                 current_player=current_player,
                 current_shot_probability=self._shot_probability,
-                sets_won_a=self._sets_won_a,
-                sets_won_b=self._sets_won_b,
-                sets_to_win=int(match_format["setsToWin"]),
+                sets_won_a=0,
+                sets_won_b=0,
+                sets_to_win=1,
                 previous_probability_a=self._previous_probability_a,
             )
         except Exception as error:
@@ -230,20 +237,16 @@ class LiveMatchCoordinator:
                 "result": None,
             }
             return dict(self._status)
-        self._previous_probability_a = float(result["matchWinProbabilityA"])
+        self._previous_probability_a = float(result["setWinProbabilityA"])
         result.update(
             {
                 "playerA": player_a,
                 "playerB": player_b,
                 "format": match_format,
-                "setNumber": set_number,
-                "setsWonA": self._sets_won_a,
-                "setsWonB": self._sets_won_b,
-                "unknownCompletedSets": self._unknown_completed_sets,
-                "setScoreProvisional": self._unknown_completed_sets > 0,
+                "probabilityScope": "current_set",
                 "prematchSource": db_inputs.get("prematchSource", "dummy"),
                 "dataSource": db_inputs.get("dataSource", "server_db"),
-                "playerNameSource": "manual" if self._manual_names else "scoreboard_ocr",
+                "playerNameSource": "manual",
             }
         )
         self._status = {"state": "ready", "detail": "계산 완료", "result": result}
